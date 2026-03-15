@@ -138,6 +138,7 @@ class ResponseSnapshot(Base):
     response_id: Mapped[str] = mapped_column(String, primary_key=True)
     parent_response_id: Mapped[str | None] = mapped_column(String, nullable=True)
     account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
     model: Mapped[str] = mapped_column(String, nullable=False)
     input_items_json: Mapped[str] = mapped_column(Text, nullable=False)
     response_json: Mapped[str] = mapped_column(Text, nullable=False)

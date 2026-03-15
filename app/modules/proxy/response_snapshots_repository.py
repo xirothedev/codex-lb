@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql import Insert, func
+from sqlalchemy.sql import Insert
 
 from app.core.types import JsonValue
 from app.db.models import ResponseSnapshot
@@ -16,12 +16,15 @@ class ResponseSnapshotsRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
-    async def get(self, response_id: str) -> ResponseSnapshot | None:
+    async def get(self, response_id: str, *, api_key_id: str | None) -> ResponseSnapshot | None:
         if not response_id:
             return None
-        result = await self._session.execute(
-            select(ResponseSnapshot).where(ResponseSnapshot.response_id == response_id)
-        )
+        statement = select(ResponseSnapshot).where(ResponseSnapshot.response_id == response_id)
+        if api_key_id is None:
+            statement = statement.where(ResponseSnapshot.api_key_id.is_(None))
+        else:
+            statement = statement.where(ResponseSnapshot.api_key_id == api_key_id)
+        result = await self._session.execute(statement)
         return result.scalar_one_or_none()
 
     async def upsert(
@@ -30,6 +33,7 @@ class ResponseSnapshotsRepository:
         response_id: str,
         parent_response_id: str | None,
         account_id: str | None,
+        api_key_id: str | None,
         model: str,
         input_items: list[JsonValue],
         response_payload: dict[str, JsonValue],
@@ -38,13 +42,14 @@ class ResponseSnapshotsRepository:
             response_id=response_id,
             parent_response_id=parent_response_id,
             account_id=account_id,
+            api_key_id=api_key_id,
             model=model,
             input_items_json=json.dumps(input_items, ensure_ascii=False, separators=(",", ":")),
             response_json=json.dumps(response_payload, ensure_ascii=False, separators=(",", ":")),
         )
         await self._session.execute(statement)
         await self._session.commit()
-        snapshot = await self.get(response_id)
+        snapshot = await self.get(response_id, api_key_id=api_key_id)
         if snapshot is None:
             raise RuntimeError(f"ResponseSnapshot upsert failed for response_id={response_id!r}")
         await self._session.refresh(snapshot)
@@ -56,6 +61,7 @@ class ResponseSnapshotsRepository:
         response_id: str,
         parent_response_id: str | None,
         account_id: str | None,
+        api_key_id: str | None,
         model: str,
         input_items_json: str,
         response_json: str,
@@ -71,6 +77,7 @@ class ResponseSnapshotsRepository:
             response_id=response_id,
             parent_response_id=parent_response_id,
             account_id=account_id,
+            api_key_id=api_key_id,
             model=model,
             input_items_json=input_items_json,
             response_json=response_json,
@@ -80,9 +87,9 @@ class ResponseSnapshotsRepository:
             set_={
                 "parent_response_id": parent_response_id,
                 "account_id": account_id,
+                "api_key_id": api_key_id,
                 "model": model,
                 "input_items_json": input_items_json,
                 "response_json": response_json,
-                "created_at": func.now(),
             },
         )

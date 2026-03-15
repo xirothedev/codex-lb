@@ -16,7 +16,7 @@ The service MUST accept POST requests to `/v1/responses` with a JSON body and MU
 - **THEN** the service returns a 4xx response with an OpenAI error envelope describing the invalid parameter
 
 ### Requirement: Support Responses input types and conversation constraints
-The service MUST accept `input` as either a string or an array of input items. When `input` is a string, the service MUST normalize it into a single user input item with `input_text` content before forwarding upstream. When the client supplies `previous_response_id`, the service MUST resolve that id from proxy-managed durable response snapshots, rebuild the prior conversation input/output history as explicit upstream input items, and continue to reject requests that include both `conversation` and `previous_response_id`.
+The service MUST accept `input` as either a string or an array of input items. When `input` is a string, the service MUST normalize it into a single user input item with `input_text` content before forwarding upstream. When the client supplies `previous_response_id`, the service MUST resolve that id from proxy-managed durable response snapshots scoped to the current requester, rebuild the prior conversation input/output history as explicit upstream input items, and continue to reject requests that include both `conversation` and `previous_response_id`.
 
 #### Scenario: String input
 - **WHEN** the client sends `input` as a string
@@ -27,9 +27,14 @@ The service MUST accept `input` as either a string or an array of input items. W
 - **THEN** the request is accepted and each item is forwarded in order
 
 #### Scenario: previous_response_id resolved from durable snapshots
-- **WHEN** the client provides `previous_response_id` that matches a persisted prior response snapshot
+- **WHEN** the client provides `previous_response_id` that matches a persisted prior response snapshot for the current requester
 - **THEN** the service forwards the rebuilt prior input/output history before the current request input
 - **AND** it does not carry forward prior `instructions`
+
+#### Scenario: previous_response_id exists for another API key
+- **WHEN** the client provides `previous_response_id` that matches a persisted prior response snapshot owned by a different API key
+- **THEN** the service returns a 400 OpenAI invalid_request_error with `param` set to `previous_response_id`
+- **AND** the error message remains `Unknown previous_response_id`
 
 #### Scenario: conversation and previous_response_id conflict
 - **WHEN** the client provides both `conversation` and `previous_response_id`

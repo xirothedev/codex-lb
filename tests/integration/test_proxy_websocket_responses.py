@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from collections import deque
 from types import SimpleNamespace
@@ -254,6 +255,168 @@ def test_v1_responses_websocket_replays_previous_response_after_restart(app_inst
         }
     ]
 
+
+
+def test_v1_responses_websocket_previous_response_id_is_scoped_to_api_key(app_instance, monkeypatch):
+    first_upstream = _FakeUpstreamWebSocket(
+        [
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.created",
+                        "response": {"id": "resp_ws_scoped", "object": "response", "status": "in_progress"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": 0,
+                        "item": {
+                            "id": "msg_ws_scoped",
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "Prior answer"}],
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": {"id": "resp_ws_scoped", "object": "response", "status": "completed"},
+                    },
+                    separators=(",", ":"),
+                ),
+            ),
+        ]
+    )
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    upstreams = deque([first_upstream])
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        sticky_key,
+        sticky_kind,
+        prefer_earlier_reset,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+        preferred_account_id=None,
+    ):
+        del self, headers, sticky_key, sticky_kind, prefer_earlier_reset
+        del reallocate_sticky, sticky_max_age_seconds, routing_strategy, model
+        del api_key, client_send_lock, websocket, preferred_account_id
+        return SimpleNamespace(id="acct_ws_scoped"), upstreams.popleft()
+
+    async def fake_write_request_log(self, **kwargs):
+        del self, kwargs
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+    monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+
+    with TestClient(app_instance) as client:
+        enable = client.put(
+            "/api/settings",
+            json={
+                "stickyThreadsEnabled": False,
+                "preferEarlierResetAccounts": False,
+                "totpRequiredOnLogin": False,
+                "apiKeyAuthEnabled": True,
+            },
+        )
+        assert enable.status_code == 200
+
+        imported = client.post(
+            "/api/accounts/import",
+            files={
+                "auth_json": (
+                    "auth.json",
+                    json.dumps(
+                        {
+                            "tokens": {
+                                "idToken": "header."
+                                + base64.urlsafe_b64encode(
+                                    json.dumps(
+                                        {
+                                            "email": "ws-scoped@example.com",
+                                            "chatgpt_account_id": "acc_ws_scoped",
+                                            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+                                        },
+                                        separators=(",", ":"),
+                                    ).encode("utf-8")
+                                ).rstrip(b"=").decode("ascii")
+                                + ".sig",
+                                "accessToken": "access-token",
+                                "refreshToken": "refresh-token",
+                                "accountId": "acc_ws_scoped",
+                            }
+                        },
+                        separators=(",", ":"),
+                    ),
+                    "application/json",
+                )
+            },
+        )
+        assert imported.status_code == 200
+
+        created_a = client.post("/api/api-keys/", json={"name": "ws-key-a"})
+        assert created_a.status_code == 200
+        key_a = created_a.json()["key"]
+
+        created_b = client.post("/api/api-keys/", json={"name": "ws-key-b"})
+        assert created_b.status_code == 200
+        key_b = created_b.json()["key"]
+
+        with client.websocket_connect("/v1/responses", headers={"Authorization": f"Bearer {key_a}"}) as websocket:
+            websocket.send_text(json.dumps({"type": "response.create", "model": "gpt-5.2", "input": "Hello"}))
+            assert json.loads(websocket.receive_text())["type"] == "response.created"
+            assert json.loads(websocket.receive_text())["type"] == "response.output_item.done"
+            assert json.loads(websocket.receive_text())["type"] == "response.completed"
+
+        if hasattr(app_instance.state, "proxy_service"):
+            delattr(app_instance.state, "proxy_service")
+
+        with client.websocket_connect("/v1/responses", headers={"Authorization": f"Bearer {key_b}"}) as websocket:
+            websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.create",
+                        "model": "gpt-5.2",
+                        "previous_response_id": "resp_ws_scoped",
+                        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Continue"}]}],
+                    }
+                )
+            )
+            event = json.loads(websocket.receive_text())
+
+    assert event["type"] == "error"
+    assert event["status"] == 400
+    assert event["error"]["type"] == "invalid_request_error"
+    assert event["error"]["param"] == "previous_response_id"
+    assert event["error"]["message"] == "Unknown previous_response_id"
 
 def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_instance, monkeypatch):
     upstream_messages = [

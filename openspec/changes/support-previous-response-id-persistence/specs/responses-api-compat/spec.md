@@ -1,7 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Support Responses input types and conversation constraints
-The service MUST accept `input` as either a string or an array of input items. When `input` is a string, the service MUST normalize it into a single user input item with `input_text` content before forwarding upstream. When a client supplies `previous_response_id`, the service MUST resolve that id from proxy-managed durable response snapshots, rebuild the prior conversation input/output history as explicit upstream input items, and continue to reject requests that include both `conversation` and `previous_response_id`.
+The service MUST accept `input` as either a string or an array of input items. When `input` is a string, the service MUST normalize it into a single user input item with `input_text` content before forwarding upstream. When a client supplies `previous_response_id`, the service MUST resolve that id from proxy-managed durable response snapshots scoped to the current requester, rebuild the prior conversation input/output history as explicit upstream input items, and continue to reject requests that include both `conversation` and `previous_response_id`.
 
 #### Scenario: previous response id resolves to replayable history
 - **WHEN** the client sends `previous_response_id` that matches a persisted prior response snapshot
@@ -9,8 +9,13 @@ The service MUST accept `input` as either a string or an array of input items. W
 - **AND** the current request's `instructions` remain the only top-level instructions forwarded upstream
 
 #### Scenario: unknown previous response id
-- **WHEN** the client sends `previous_response_id` that does not match a persisted prior response snapshot
+- **WHEN** the client sends `previous_response_id` that does not match a persisted prior response snapshot for the current requester
 - **THEN** the service returns a 400 OpenAI-format error envelope with `param=previous_response_id`
+
+#### Scenario: previous response id belongs to a different API key
+- **WHEN** the client sends `previous_response_id` that matches a persisted prior response snapshot for a different API key
+- **THEN** the service returns a 400 OpenAI-format error envelope with `param=previous_response_id`
+- **AND** the message remains `Unknown previous_response_id`
 
 #### Scenario: conversation and previous response id conflict
 - **WHEN** the client provides both `conversation` and `previous_response_id`

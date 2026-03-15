@@ -52,7 +52,7 @@ from app.core.exceptions import AppError, ProxyAuthError, ProxyRateLimitError
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
 from app.core.openai.parsing import parse_response_payload, parse_sse_event
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, _sanitize_input_items
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, sanitize_input_items
 from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
@@ -840,7 +840,10 @@ class ProxyService:
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
         validate_model_access(refreshed_api_key, responses_payload.model)
 
-        resolved_request = await self._resolve_previous_response_request(responses_payload)
+        resolved_request = await self._resolve_previous_response_request(
+            responses_payload,
+            api_key_id=refreshed_api_key.id if refreshed_api_key else None,
+        )
         responses_payload = resolved_request.payload
 
         upstream_payload = dict(responses_payload.to_payload())
@@ -864,6 +867,7 @@ class ProxyService:
                 preferred_account_id=resolved_request.preferred_account_id,
                 current_input_items=resolved_request.current_input_items,
                 awaiting_response_created=True,
+                api_key_id=refreshed_api_key.id if refreshed_api_key else None,
             ),
             affinity_policy=_sticky_key_for_responses_request(
                 responses_payload,
@@ -1479,6 +1483,7 @@ class ProxyService:
                 response_id=response_id,
                 parent_response_id=request_state.parent_response_id,
                 account_id=account_id_value,
+                api_key_id=request_state.api_key_id,
                 model=request_state.model or "",
                 input_items=request_state.current_input_items,
                 response_payload=_terminal_response_payload(payload, request_state.output_items),
@@ -1859,7 +1864,10 @@ class ProxyService:
         base_settings = get_settings()
         settings = await get_settings_cache().get()
         deadline = start + base_settings.proxy_request_budget_seconds
-        resolved_request = await self._resolve_previous_response_request(payload)
+        resolved_request = await self._resolve_previous_response_request(
+            payload,
+            api_key_id=api_key.id if api_key else None,
+        )
         payload = resolved_request.payload
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         upstream_stream_transport = _resolve_upstream_stream_transport(settings.upstream_stream_transport)
@@ -2498,6 +2506,7 @@ class ProxyService:
                     response_id=response_id,
                     parent_response_id=parent_response_id,
                     account_id=account_id_value,
+                    api_key_id=api_key.id if api_key else None,
                     model=model,
                     input_items=snapshot_input_items,
                     response_payload=completed_response_payload,
@@ -2806,13 +2815,21 @@ class ProxyService:
             logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)
             _raise_proxy_budget_exhausted()
 
-    async def _resolve_previous_response_request(self, payload: ResponsesRequest) -> _ResolvedResponsesRequest:
+    async def _resolve_previous_response_request(
+        self,
+        payload: ResponsesRequest,
+        *,
+        api_key_id: str | None,
+    ) -> _ResolvedResponsesRequest:
         current_input_items = _clone_json_list(payload.input)
         previous_response_id = payload.previous_response_id
         if not previous_response_id:
             return _ResolvedResponsesRequest(payload=payload, current_input_items=current_input_items)
 
-        replay_items, preferred_account_id = await self._resolve_previous_response_chain(previous_response_id)
+        replay_items, preferred_account_id = await self._resolve_previous_response_chain(
+            previous_response_id,
+            api_key_id=api_key_id,
+        )
         resolved_payload = payload.model_copy(
             deep=True,
             update={
@@ -2827,7 +2844,12 @@ class ProxyService:
             preferred_account_id=preferred_account_id,
         )
 
-    async def _resolve_previous_response_chain(self, response_id: str) -> tuple[list[JsonValue], str | None]:
+    async def _resolve_previous_response_chain(
+        self,
+        response_id: str,
+        *,
+        api_key_id: str | None,
+    ) -> tuple[list[JsonValue], str | None]:
         if not response_id:
             _raise_unknown_previous_response_id()
 
@@ -2843,7 +2865,7 @@ class ProxyService:
                 if current_id in seen_response_ids:
                     _raise_unknown_previous_response_id()
                 seen_response_ids.add(current_id)
-                snapshot = await repos.response_snapshots.get(current_id)
+                snapshot = await repos.response_snapshots.get(current_id, api_key_id=api_key_id)
                 if snapshot is None:
                     _raise_unknown_previous_response_id()
                 chain.append(
@@ -2873,6 +2895,7 @@ class ProxyService:
         response_id: str | None,
         parent_response_id: str | None,
         account_id: str | None,
+        api_key_id: str | None,
         model: str,
         input_items: list[JsonValue],
         response_payload: dict[str, JsonValue] | None,
@@ -2893,6 +2916,7 @@ class ProxyService:
                         response_id=response_id,
                         parent_response_id=parent_response_id,
                         account_id=account_id,
+                        api_key_id=api_key_id,
                         model=model,
                         input_items=input_items,
                         response_payload=response_payload,
@@ -3003,6 +3027,7 @@ class _WebSocketRequestState:
     current_input_items: list[JsonValue] = field(default_factory=list)
     output_items: dict[int, dict[str, JsonValue]] = field(default_factory=dict)
     awaiting_response_created: bool = False
+    api_key_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -3101,7 +3126,7 @@ def _replayable_response_output_items(response_payload: dict[str, JsonValue]) ->
         for item in output_value
         if not (isinstance(item, dict) and item.get("type") == "reasoning")
     ]
-    normalized_output = _sanitize_input_items(filtered_output)
+    normalized_output = sanitize_input_items(filtered_output)
     replay_items: list[JsonValue] = []
     for item in normalized_output:
         if isinstance(item, dict) and item.get("role") == "assistant":

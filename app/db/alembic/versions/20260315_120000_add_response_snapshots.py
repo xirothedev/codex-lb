@@ -23,6 +23,13 @@ def _table_exists(connection: Connection, table_name: str) -> bool:
     return inspector.has_table(table_name)
 
 
+def _columns(connection: Connection, table_name: str) -> set[str]:
+    inspector = sa.inspect(connection)
+    if not inspector.has_table(table_name):
+        return set()
+    return {str(column["name"]) for column in inspector.get_columns(table_name) if column.get("name") is not None}
+
+
 def _indexes(connection: Connection, table_name: str) -> set[str]:
     inspector = sa.inspect(connection)
     if not inspector.has_table(table_name):
@@ -38,12 +45,16 @@ def upgrade() -> None:
             sa.Column("response_id", sa.String(), nullable=False),
             sa.Column("parent_response_id", sa.String(), nullable=True),
             sa.Column("account_id", sa.String(), nullable=True),
+            sa.Column("api_key_id", sa.String(), nullable=True),
             sa.Column("model", sa.String(), nullable=False),
             sa.Column("input_items_json", sa.Text(), nullable=False),
             sa.Column("response_json", sa.Text(), nullable=False),
             sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
             sa.PrimaryKeyConstraint("response_id"),
         )
+    existing_columns = _columns(bind, "response_snapshots")
+    if "api_key_id" not in existing_columns:
+        op.add_column("response_snapshots", sa.Column("api_key_id", sa.String(), nullable=True))
     existing_indexes = _indexes(bind, "response_snapshots")
     if "idx_response_snapshots_parent_created_at" not in existing_indexes:
         op.create_index(
@@ -55,4 +66,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    return
+    bind = op.get_bind()
+    if not _table_exists(bind, "response_snapshots"):
+        return
+    existing_indexes = _indexes(bind, "response_snapshots")
+    if "idx_response_snapshots_parent_created_at" in existing_indexes:
+        op.drop_index("idx_response_snapshots_parent_created_at", table_name="response_snapshots")
+    op.drop_table("response_snapshots")

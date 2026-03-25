@@ -11,6 +11,7 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import UpstreamModel, get_model_registry
 from app.db.models import Account, AccountStatus
+from app.modules.accounts.runtime_health import PAUSE_REASON_MODEL_REFRESH, pause_account
 from app.db.session import get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
@@ -114,18 +115,13 @@ async def _fetch_with_failover(
             return await fetch_models_for_plan(access_token, account_id)
         except ModelFetchError as exc:
             if exc.status_code == 401:
-                try:
-                    account = await auth_manager.ensure_fresh(account, force=True)
-                    access_token = encryptor.decrypt(account.access_token_encrypted)
-                    return await fetch_models_for_plan(access_token, account.chatgpt_account_id)
-                except (ModelFetchError, RefreshError):
-                    logger.warning(
-                        "Model fetch 401 retry failed account=%s plan=%s",
-                        account.id,
-                        account.plan_type,
-                        exc_info=True,
-                    )
-                    continue
+                await pause_account(accounts_repo, account, PAUSE_REASON_MODEL_REFRESH)
+                logger.warning(
+                    "Model fetch received upstream 401 and paused account=%s plan=%s",
+                    account.id,
+                    account.plan_type,
+                )
+                continue
             logger.warning(
                 "Model fetch failed account=%s plan=%s status=%d",
                 account.id,

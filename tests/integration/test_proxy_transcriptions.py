@@ -7,10 +7,11 @@ import pytest
 from sqlalchemy import update
 
 import app.modules.proxy.service as proxy_module
+from app.core.auth import generate_unique_account_id
 from app.core.auth.refresh import RefreshError
 from app.core.errors import openai_error
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
-from app.db.models import ApiKeyLimit
+from app.db.models import Account, AccountStatus, ApiKeyLimit
 from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
@@ -161,8 +162,13 @@ async def test_v1_audio_transcriptions_forwards_prompt(async_client, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_backend_transcribe_retry_uses_refreshed_account_id(async_client, monkeypatch):
-    await _import_account(async_client, "acc_transcribe_retry_old", "retry-transcribe@example.com")
+async def test_backend_transcribe_401_pauses_failed_account_and_fails_over(async_client, monkeypatch):
+    first_email = "retry-transcribe-a@example.com"
+    second_email = "retry-transcribe-b@example.com"
+    first_account_id = "acc_transcribe_retry_a"
+    second_account_id = "acc_transcribe_retry_b"
+    await _import_account(async_client, first_account_id, first_email)
+    await _import_account(async_client, second_account_id, second_email)
     captured_account_ids: list[str | None] = []
 
     async def fake_transcribe(
@@ -186,8 +192,6 @@ async def test_backend_transcribe_retry_uses_refreshed_account_id(async_client, 
         return {"text": "retried"}
 
     async def fake_ensure_fresh(self, account, force: bool = False):
-        if force:
-            account.chatgpt_account_id = "acc_transcribe_retry_new"
         return account
 
     monkeypatch.setattr(proxy_module, "core_transcribe_audio", fake_transcribe)
@@ -199,7 +203,15 @@ async def test_backend_transcribe_retry_uses_refreshed_account_id(async_client, 
     )
     assert response.status_code == 200
     assert response.json()["text"] == "retried"
-    assert captured_account_ids == ["acc_transcribe_retry_old", "acc_transcribe_retry_new"]
+    assert captured_account_ids == [first_account_id, second_account_id]
+
+    async with SessionLocal() as session:
+        failed = await session.get(Account, generate_unique_account_id(first_account_id, first_email))
+        fallback = await session.get(Account, generate_unique_account_id(second_account_id, second_email))
+        assert failed is not None
+        assert fallback is not None
+        assert failed.status == AccountStatus.PAUSED
+        assert fallback.status == AccountStatus.ACTIVE
 
 
 @pytest.mark.asyncio

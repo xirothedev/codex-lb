@@ -2981,19 +2981,27 @@ async def test_connect_proxy_websocket_maps_budget_exhaustion_to_timeout_error(m
 async def test_connect_proxy_websocket_surfaces_retry_handshake_error(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
-    account = _make_account("acc_ws_retry_error")
+    first_account = _make_account("acc_ws_retry_error_first")
+    second_account = _make_account("acc_ws_retry_error_second")
     first_exc = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "expired"))
     second_exc = proxy_module.ProxyResponseError(403, openai_error("forbidden", "denied"))
     handle_connect_error = AsyncMock()
+    pause_account = AsyncMock()
 
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
-        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+        AsyncMock(
+            side_effect=[
+                AccountSelection(account=first_account, error_message=None),
+                AccountSelection(account=second_account, error_message=None),
+            ]
+        ),
     )
-    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account, account]))
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[first_account, second_account]))
     monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(side_effect=[first_exc, second_exc]))
     monkeypatch.setattr(service, "_handle_websocket_connect_error", handle_connect_error)
+    monkeypatch.setattr(service, "_pause_account_for_upstream_401", pause_account)
     monkeypatch.setattr(service, "_release_websocket_reservation", AsyncMock())
 
     request_state = proxy_service._WebSocketRequestState(
@@ -3025,6 +3033,7 @@ async def test_connect_proxy_websocket_surfaces_retry_handshake_error(monkeypatc
     await_args = handle_connect_error.await_args
     assert await_args is not None
     assert await_args.args[1] is second_exc
+    pause_account.assert_awaited_once_with(first_account)
     websocket_await_args = websocket_send.await_args
     assert websocket_await_args is not None
     sent_payload = json.loads(websocket_await_args.args[0])
@@ -3090,17 +3099,25 @@ async def test_connect_proxy_websocket_surfaces_refresh_transport_error(monkeypa
 async def test_connect_proxy_websocket_surfaces_forced_refresh_transport_error(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
-    account = _make_account("acc_ws_forced_refresh_timeout")
+    first_account = _make_account("acc_ws_forced_refresh_timeout_first")
+    second_account = _make_account("acc_ws_forced_refresh_timeout_second")
     initial_error = proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "expired"))
     release_reservation = AsyncMock()
+    pause_account = AsyncMock()
 
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
-        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+        AsyncMock(
+            side_effect=[
+                AccountSelection(account=first_account, error_message=None),
+                AccountSelection(account=second_account, error_message=None),
+            ]
+        ),
     )
-    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[account, asyncio.TimeoutError()]))
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(side_effect=[first_account, asyncio.TimeoutError()]))
     monkeypatch.setattr(service, "_open_upstream_websocket", AsyncMock(side_effect=initial_error))
+    monkeypatch.setattr(service, "_pause_account_for_upstream_401", pause_account)
     monkeypatch.setattr(service, "_release_websocket_reservation", release_reservation)
 
     request_state = proxy_service._WebSocketRequestState(
@@ -3129,6 +3146,7 @@ async def test_connect_proxy_websocket_surfaces_forced_refresh_transport_error(m
 
     assert selected_account is None
     assert selected_upstream is None
+    pause_account.assert_awaited_once_with(first_account)
     release_reservation.assert_awaited_once_with(None)
     await_args = websocket_send.await_args
     assert await_args is not None
@@ -3680,22 +3698,29 @@ async def test_stream_refresh_timeout_emits_upstream_unavailable_and_logs(monkey
 
 
 @pytest.mark.asyncio
-async def test_stream_forced_refresh_timeout_emits_upstream_unavailable_and_logs(monkeypatch):
+async def test_stream_failover_refresh_timeout_emits_upstream_unavailable_and_logs(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
-    account = _make_account("acc_stream_forced_refresh_timeout")
+    first_account = _make_account("acc_stream_forced_refresh_timeout_first")
+    second_account = _make_account("acc_stream_forced_refresh_timeout_second")
+    pause_account = AsyncMock()
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
     monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
-        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+        AsyncMock(
+            side_effect=[
+                AccountSelection(account=first_account, error_message=None),
+                AccountSelection(account=second_account, error_message=None),
+            ]
+        ),
     )
 
     async def fake_ensure_fresh(account, *, force: bool = False, timeout_seconds: float | None = None):
-        if force:
+        if account.id == second_account.id:
             raise asyncio.TimeoutError
         return account
 
@@ -3705,6 +3730,7 @@ async def test_stream_forced_refresh_timeout_emits_upstream_unavailable_and_logs
             yield ""
 
     monkeypatch.setattr(service, "_ensure_fresh", fake_ensure_fresh)
+    monkeypatch.setattr(service, "_pause_account_for_upstream_401", pause_account)
     monkeypatch.setattr(proxy_service, "core_stream_responses", failing_stream)
 
     payload = ResponsesRequest.model_validate({"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True})
@@ -3714,7 +3740,8 @@ async def test_stream_forced_refresh_timeout_emits_upstream_unavailable_and_logs
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "upstream_unavailable"
     assert event["response"]["error"]["message"] == "Request to upstream timed out"
-    assert request_logs.calls[-1]["account_id"] == account.id
+    pause_account.assert_awaited_once_with(first_account)
+    assert request_logs.calls[-1]["account_id"] == second_account.id
     assert request_logs.calls[-1]["status"] == "error"
     assert request_logs.calls[-1]["error_code"] == "upstream_unavailable"
     assert request_logs.calls[-1]["error_message"] == "Request to upstream timed out"
@@ -3824,13 +3851,15 @@ async def test_stream_attempt_timeout_overrides_follow_remaining_budget(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_stream_forced_refresh_reapplies_idle_and_total_budget_overrides(monkeypatch):
+async def test_stream_failover_reapplies_idle_and_total_budget_overrides(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
-    account = _make_account("acc_stream_forced_refresh_budget")
+    first_account = _make_account("acc_stream_forced_refresh_budget_first")
+    second_account = _make_account("acc_stream_forced_refresh_budget_second")
     overrides: list[dict[str, float | None]] = []
     stream_call_count = {"count": 0}
+    pause_account = AsyncMock()
 
     remaining_budget_values = iter((10.0, 10.0, 10.0, 6.0, 2.0))
 
@@ -3872,10 +3901,16 @@ async def test_stream_forced_refresh_reapplies_idle_and_total_budget_overrides(m
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
-        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+        AsyncMock(
+            side_effect=[
+                AccountSelection(account=first_account, error_message=None),
+                AccountSelection(account=second_account, error_message=None),
+            ]
+        ),
     )
     monkeypatch.setattr(service, "_ensure_fresh", fake_ensure_fresh)
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
+    monkeypatch.setattr(service, "_pause_account_for_upstream_401", pause_account)
     monkeypatch.setattr(proxy_service, "core_stream_responses", fake_stream)
     monkeypatch.setattr(proxy_service, "push_stream_timeout_overrides", fake_push_stream_timeout_overrides)
     monkeypatch.setattr(proxy_service, "pop_stream_timeout_overrides", lambda tokens: None)
@@ -3886,6 +3921,7 @@ async def test_stream_forced_refresh_reapplies_idle_and_total_budget_overrides(m
 
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["type"] == "response.completed"
+    pause_account.assert_awaited_once_with(first_account)
     assert len(overrides) == 2
     assert overrides[-1] == {"connect": 2.0, "idle": 2.0, "total": 2.0}
     assert all(override["connect"] == override["idle"] == override["total"] for override in overrides)
@@ -4067,25 +4103,17 @@ async def test_compact_selection_budget_exhaustion_returns_upstream_unavailable(
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
     assert exc.payload["error"]["code"] == "upstream_unavailable"
-    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[0]["error_code"] == "no_accounts"
 
 
 @pytest.mark.asyncio
-async def test_transcribe_budget_exhaustion_blocks_401_retry(monkeypatch):
+async def test_transcribe_401_pauses_account_and_returns_no_accounts_when_pool_exhausted(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     account = _make_account("acc_transcribe_budget")
     transcribe_calls = 0
-
-    runtime_values = dict(settings.__dict__)
-    runtime_values["transcription_request_budget_seconds"] = 1.0
-    runtime_settings = SimpleNamespace(**runtime_values)
-    monotonic_calls = {"count": 0}
-
-    def fake_monotonic():
-        monotonic_calls["count"] += 1
-        return 100.0 if monotonic_calls["count"] < 7 else 102.0
+    pause_account = AsyncMock()
 
     async def fake_transcribe(
         audio_bytes: bytes,
@@ -4104,14 +4132,19 @@ async def test_transcribe_budget_exhaustion_blocks_401_retry(monkeypatch):
         raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token expired"))
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: runtime_settings)
-    monkeypatch.setattr(proxy_service.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
-        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
+        AsyncMock(
+            side_effect=[
+                AccountSelection(account=account, error_message=None),
+                AccountSelection(account=None, error_message="All accounts are paused", error_code="no_accounts"),
+            ]
+        ),
     )
     monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_pause_account_for_upstream_401", pause_account)
     monkeypatch.setattr(proxy_service, "core_transcribe_audio", fake_transcribe)
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
@@ -4124,10 +4157,11 @@ async def test_transcribe_budget_exhaustion_blocks_401_retry(monkeypatch):
         )
 
     exc = _assert_proxy_response_error(exc_info.value)
-    assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert exc.status_code == 503
+    assert exc.payload["error"]["code"] == "no_accounts"
+    pause_account.assert_awaited_once_with(account)
     assert transcribe_calls == 1
-    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+    assert request_logs.calls[0]["error_code"] == "no_accounts"
     assert request_logs.calls[0]["transport"] == "http"
 
 

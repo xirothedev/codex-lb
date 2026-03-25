@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Protocol
 
-from app.core.auth.refresh import RefreshError
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
@@ -19,6 +18,7 @@ from app.core.utils.request_id import get_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
+from app.modules.accounts.runtime_health import PAUSE_REASON_USAGE_REFRESH, pause_account
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.repository import AdditionalUsageRepository
 
@@ -270,22 +270,10 @@ class UsageUpdater:
             if _should_deactivate_for_usage_error(exc.status_code):
                 await self._deactivate_for_client_error(account, exc)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
-            if exc.status_code != 401 or not self._auth_manager:
+            if exc.status_code == 401 and self._accounts_repo is not None:
+                await pause_account(self._accounts_repo, account, PAUSE_REASON_USAGE_REFRESH)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
-            try:
-                account = await self._auth_manager.ensure_fresh(account, force=True)
-            except RefreshError:
-                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
-            access_token = self._encryptor.decrypt(account.access_token_encrypted)
-            try:
-                payload = await fetch_usage(
-                    access_token=access_token,
-                    account_id=usage_account_id,
-                )
-            except UsageFetchError as retry_exc:
-                if _should_deactivate_for_usage_error(retry_exc.status_code):
-                    await self._deactivate_for_client_error(account, retry_exc)
-                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+            return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
         if payload is None:
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)

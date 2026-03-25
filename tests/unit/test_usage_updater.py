@@ -12,6 +12,7 @@ from app.core.auth.refresh import RefreshError
 from app.core.crypto import TokenEncryptor
 from app.core.usage.models import UsagePayload
 from app.db.models import Account, AccountStatus, UsageHistory
+from app.modules.accounts.runtime_health import PAUSE_REASON_USAGE_REFRESH
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 from app.modules.usage.updater import UsageUpdater, _last_successful_refresh
 
@@ -427,7 +428,7 @@ async def test_usage_updater_does_not_deactivate_on_transient_4xx(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_usage_updater_does_not_deactivate_on_401(monkeypatch) -> None:
+async def test_usage_updater_pauses_on_401(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
     from app.core.config.settings import get_settings
@@ -448,7 +449,14 @@ async def test_usage_updater_does_not_deactivate_on_401(monkeypatch) -> None:
 
     await updater.refresh_accounts([acc], latest_usage={})
 
-    assert len(accounts_repo.status_updates) == 0
+    assert accounts_repo.status_updates == [
+        {
+            "account_id": acc.id,
+            "status": AccountStatus.PAUSED,
+            "deactivation_reason": PAUSE_REASON_USAGE_REFRESH,
+        }
+    ]
+    assert acc.status == AccountStatus.PAUSED
 
 
 @pytest.mark.asyncio
@@ -622,7 +630,7 @@ async def test_usage_updater_refresh_accounts_returns_false_when_rate_limit_miss
 
 
 @pytest.mark.asyncio
-async def test_usage_updater_refresh_accounts_returns_false_on_401_retry_failure(monkeypatch) -> None:
+async def test_usage_updater_refresh_accounts_returns_false_and_pauses_on_401(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
     from app.core.config.settings import get_settings
@@ -637,12 +645,6 @@ async def test_usage_updater_refresh_accounts_returns_false_on_401_retry_failure
     usage_repo = StubUsageRepository(return_rows=True)
     accounts_repo = StubAccountsRepository()
     updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
-    assert updater._auth_manager is not None
-
-    async def stub_ensure_fresh(account: Account, *, force: bool = False) -> Account:
-        raise RefreshError(code="invalid_grant", message="refresh failed", is_permanent=False)
-
-    monkeypatch.setattr(updater._auth_manager, "ensure_fresh", stub_ensure_fresh)
 
     acc = _make_account("acc_401_retry", "workspace_401_retry", email="auth-retry@example.com")
     accounts_repo.accounts_by_id[acc.id] = acc
@@ -650,6 +652,11 @@ async def test_usage_updater_refresh_accounts_returns_false_on_401_retry_failure
 
     assert refreshed is False
     assert len(usage_repo.entries) == 0
+    assert accounts_repo.status_updates[-1] == {
+        "account_id": acc.id,
+        "status": AccountStatus.PAUSED,
+        "deactivation_reason": PAUSE_REASON_USAGE_REFRESH,
+    }
 
 
 @pytest.mark.parametrize(

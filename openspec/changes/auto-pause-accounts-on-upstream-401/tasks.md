@@ -1,0 +1,5 @@
+- [x] 1. Add spec deltas for runtime account-health auto-pause policy and replace existing `401 -> refresh/retry` requirements that conflict with it.
+- [x] 2. Add failing unit tests for paused-state persistence, usage/model refresh auto-pause, and request-level alternate-account failover after `401`.
+- [x] 3. Add or update integration tests for compact, transcription, and at least one Responses/websocket flow to assert first-`401` pause plus alternate-account retry.
+- [x] 4. Implement balancer pause helpers, background refresh pause handling, and proxy failover wiring with failed-account exclusion.
+- [x] 5. Run targeted spec validation and affected tests, then mark the change complete.

@@ -308,13 +308,16 @@ async def test_proxy_compact_usage_limit_marks_account(async_client, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_proxy_compact_retry_uses_refreshed_account_id(async_client, monkeypatch):
-    email = "compact-retry@example.com"
-    raw_account_id = "acc_compact_retry_old"
-    auth_json = _make_auth_json(raw_account_id, email)
-    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
-    response = await async_client.post("/api/accounts/import", files=files)
-    assert response.status_code == 200
+async def test_proxy_compact_401_pauses_failed_account_and_fails_over(async_client, monkeypatch):
+    first_email = "compact-a@example.com"
+    second_email = "compact-b@example.com"
+    first_account_id = "acc_compact_retry_a"
+    second_account_id = "acc_compact_retry_b"
+    for account_id, email in ((first_account_id, first_email), (second_account_id, second_email)):
+        auth_json = _make_auth_json(account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
 
     captured_account_ids: list[str | None] = []
 
@@ -328,8 +331,6 @@ async def test_proxy_compact_retry_uses_refreshed_account_id(async_client, monke
         return OpenAIResponsePayload.model_validate({"output": []})
 
     async def fake_ensure_fresh(self, account, force: bool = False):
-        if force:
-            account.chatgpt_account_id = "acc_compact_retry_new"
         return account
 
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
@@ -339,7 +340,15 @@ async def test_proxy_compact_retry_uses_refreshed_account_id(async_client, monke
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
     assert response.status_code == 200
     assert response.json()["output"] == []
-    assert captured_account_ids == ["acc_compact_retry_old", "acc_compact_retry_new"]
+    assert captured_account_ids == [first_account_id, second_account_id]
+
+    async with SessionLocal() as session:
+        failed = await session.get(Account, generate_unique_account_id(first_account_id, first_email))
+        fallback = await session.get(Account, generate_unique_account_id(second_account_id, second_email))
+        assert failed is not None
+        assert fallback is not None
+        assert failed.status == AccountStatus.PAUSED
+        assert fallback.status == AccountStatus.ACTIVE
 
 
 @pytest.mark.asyncio

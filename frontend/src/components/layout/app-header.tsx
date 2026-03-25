@@ -8,19 +8,27 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/co
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { cn } from "@/lib/utils";
 
-const NAV_ITEMS = [
+const DEFAULT_NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard" },
   { to: "/accounts", label: "Accounts" },
   { to: "/settings", label: "Settings" },
 ] as const;
 
+export type AppHeaderNavItem = {
+  to: string;
+  label: string;
+  end?: boolean;
+};
+
 export type AppHeaderProps = {
+  navItems?: readonly AppHeaderNavItem[];
   onLogout: () => void;
   showLogout?: boolean;
   className?: string;
 };
 
 export function AppHeader({
+  navItems = DEFAULT_NAV_ITEMS,
   onLogout,
   showLogout = true,
   className,
@@ -38,7 +46,6 @@ export function AppHeader({
       )}
     >
       <div className="mx-auto flex w-full max-w-[1500px] items-center justify-between gap-4">
-        {/* Brand */}
         <div className="flex min-w-0 flex-1 items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-primary/15 to-primary/5">
             <CodexLogo size={20} className="text-primary" />
@@ -48,27 +55,28 @@ export function AppHeader({
           </div>
         </div>
 
-        {/* Desktop nav pills */}
-        <nav className="hidden items-center rounded-lg border border-border/50 bg-muted/40 p-0.5 sm:flex">
-          {NAV_ITEMS.map((item) => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              className={({ isActive }) =>
-                cn(
-                  "relative inline-flex h-7 items-center rounded-md px-3.5 text-xs leading-none font-medium transition-colors duration-200",
-                  isActive
-                    ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
-                    : "text-muted-foreground hover:text-foreground",
-                )
-              }
-            >
-              {item.label}
-            </NavLink>
-          ))}
-        </nav>
+        {navItems.length > 0 ? (
+          <nav className="hidden items-center rounded-lg border border-border/50 bg-muted/40 p-0.5 sm:flex">
+            {navItems.map((item) => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.end}
+                className={({ isActive }) =>
+                  cn(
+                    "relative inline-flex h-7 items-center rounded-md px-3.5 text-xs leading-none font-medium transition-colors duration-200",
+                    isActive
+                      ? "bg-background text-foreground shadow-[var(--shadow-xs)]"
+                      : "text-muted-foreground hover:text-foreground",
+                  )
+                }
+              >
+                {item.label}
+              </NavLink>
+            ))}
+          </nav>
+        ) : null}
 
-        {/* Actions */}
         <div className="flex flex-1 items-center justify-end gap-1.5">
           <Button
             type="button"
@@ -93,7 +101,6 @@ export function AppHeader({
             </Button>
           )}
 
-          {/* Mobile menu */}
           <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
             <SheetTrigger asChild>
               <Button type="button" size="icon" variant="ghost" aria-label="Open menu" className="h-8 w-8 rounded-lg sm:hidden">
@@ -110,8 +117,8 @@ export function AppHeader({
                 </SheetTitle>
               </SheetHeader>
               <nav className="flex flex-col gap-0.5 px-4 pt-2">
-                {NAV_ITEMS.map((item) => (
-                  <NavLink key={item.to} to={item.to} onClick={() => setMobileOpen(false)}>
+                {navItems.map((item) => (
+                  <NavLink key={item.to} to={item.to} end={item.end} onClick={() => setMobileOpen(false)}>
                     {({ isActive }) => (
                       <span
                         className={cn(

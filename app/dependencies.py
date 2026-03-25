@@ -29,6 +29,8 @@ from app.modules.settings.service import SettingsService
 from app.modules.sticky_sessions.service import StickySessionsService
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.service import UsageService
+from app.modules.viewer_auth.service import ViewerAuthService, get_viewer_session_store
+from app.modules.viewer_portal.service import ViewerPortalService
 
 
 @dataclass(slots=True)
@@ -63,6 +65,13 @@ class ProxyContext:
 
 
 @dataclass(slots=True)
+class ViewerAuthContext:
+    session: AsyncSession
+    repository: ApiKeysRepository
+    service: ViewerAuthService
+
+
+@dataclass(slots=True)
 class ApiKeysContext:
     session: AsyncSession
     repository: ApiKeysRepository
@@ -74,6 +83,15 @@ class RequestLogsContext:
     session: AsyncSession
     repository: RequestLogsRepository
     service: RequestLogsService
+
+
+@dataclass(slots=True)
+class ViewerPortalContext:
+    session: AsyncSession
+    api_keys_repository: ApiKeysRepository
+    request_logs_repository: RequestLogsRepository
+    auth_service: ViewerAuthService
+    service: ViewerPortalService
 
 
 @dataclass(slots=True)
@@ -188,6 +206,33 @@ def get_proxy_service_for_app(app: object) -> ProxyService:
 def get_proxy_websocket_context(websocket: WebSocket) -> ProxyContext:
     service = get_proxy_service_for_app(websocket.app)
     return ProxyContext(service=service)
+
+
+def get_viewer_auth_context(
+    session: AsyncSession = Depends(get_session),
+) -> ViewerAuthContext:
+    repository = ApiKeysRepository(session)
+    api_keys_service = ApiKeysService(repository)
+    service = ViewerAuthService(api_keys_service, get_viewer_session_store())
+    return ViewerAuthContext(session=session, repository=repository, service=service)
+
+
+def get_viewer_portal_context(
+    session: AsyncSession = Depends(get_session),
+) -> ViewerPortalContext:
+    api_keys_repository = ApiKeysRepository(session)
+    request_logs_repository = RequestLogsRepository(session)
+    api_keys_service = ApiKeysService(api_keys_repository)
+    request_logs_service = RequestLogsService(request_logs_repository)
+    auth_service = ViewerAuthService(api_keys_service, get_viewer_session_store())
+    service = ViewerPortalService(api_keys_service, request_logs_service)
+    return ViewerPortalContext(
+        session=session,
+        api_keys_repository=api_keys_repository,
+        request_logs_repository=request_logs_repository,
+        auth_service=auth_service,
+        service=service,
+    )
 
 
 def get_api_keys_context(

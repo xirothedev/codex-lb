@@ -104,10 +104,13 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 }));
 
-setUnauthorizedHandler(() => {
-  useAuthStore.setState({
-    authenticated: false,
-    initialized: true,
-    error: null,
-  });
-});
+setUnauthorizedHandler(
+  () => {
+    useAuthStore.setState({
+      authenticated: false,
+      initialized: true,
+      error: null,
+    });
+  },
+  (path) => path.startsWith("/api/") && !path.startsWith("/api/viewer") && !path.startsWith("/api/viewer-auth"),
+);

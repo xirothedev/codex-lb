@@ -35,10 +35,21 @@ export class ApiError extends Error {
   }
 }
 
-let unauthorizedHandler: (() => void) | null = null;
+type UnauthorizedHandlerRegistration = {
+  handler: () => void;
+  matches: (path: string) => boolean;
+};
 
-export function setUnauthorizedHandler(handler: (() => void) | null): void {
-  unauthorizedHandler = handler;
+const unauthorizedHandlers = new Set<UnauthorizedHandlerRegistration>();
+
+export function setUnauthorizedHandler(
+  handler: (() => void) | null,
+  matches: (path: string) => boolean = () => true,
+): void {
+  if (!handler) {
+    return;
+  }
+  unauthorizedHandlers.add({ handler, matches });
 }
 
 function isBodyInit(value: unknown): value is BodyInit {
@@ -159,7 +170,12 @@ async function request<T>(
   }
 
   if (response.status === 401) {
-    unauthorizedHandler?.();
+    const path = new URL(response.url || url, window.location.origin).pathname;
+    for (const registration of unauthorizedHandlers) {
+      if (registration.matches(path)) {
+        registration.handler();
+      }
+    }
   }
 
   const payload = await readJsonPayload(response);

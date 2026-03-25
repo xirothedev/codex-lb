@@ -58,7 +58,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             row.limits = self._limits.get(row.id, [])
         return result
 
-    async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
+    async def list_usage_summary_by_key(self, key_ids: list[str] | None = None) -> dict[str, ApiKeyUsageSummary]:
         return {}
 
     async def update(

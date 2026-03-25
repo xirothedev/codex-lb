@@ -48,6 +48,14 @@ const EXPECTED_ENDPOINTS = [
   "POST /api/dashboard-auth/totp/verify",
   "POST /api/dashboard-auth/totp/disable",
   "POST /api/dashboard-auth/logout",
+  // viewer
+  "GET /api/viewer-auth/session",
+  "POST /api/viewer-auth/login",
+  "POST /api/viewer-auth/logout",
+  "GET /api/viewer/api-key",
+  "POST /api/viewer/api-key/regenerate",
+  "GET /api/viewer/request-logs",
+  "GET /api/viewer/request-logs/options",
   // settings
   "GET /api/settings",
   "PUT /api/settings",

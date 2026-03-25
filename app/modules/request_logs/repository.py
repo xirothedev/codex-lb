@@ -136,6 +136,7 @@ class RequestLogsRepository:
         since: datetime | None = None,
         until: datetime | None = None,
         account_ids: list[str] | None = None,
+        api_key_ids: list[str] | None = None,
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
@@ -149,6 +150,7 @@ class RequestLogsRepository:
             since=since,
             until=until,
             account_ids=account_ids,
+            api_key_ids=api_key_ids,
             model_options=model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
@@ -188,6 +190,7 @@ class RequestLogsRepository:
         since: datetime | None = None,
         until: datetime | None = None,
         account_ids: list[str] | None = None,
+        api_key_ids: list[str] | None = None,
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
@@ -196,6 +199,7 @@ class RequestLogsRepository:
             since=since,
             until=until,
             account_ids=account_ids,
+            api_key_ids=api_key_ids,
             model_options=model_options,
             models=models,
             reasoning_efforts=reasoning_efforts,
@@ -245,6 +249,7 @@ class RequestLogsRepository:
         since: datetime | None = None,
         until: datetime | None = None,
         account_ids: list[str] | None = None,
+        api_key_ids: list[str] | None = None,
         model_options: list[tuple[str, str | None]] | None = None,
         models: list[str] | None = None,
         reasoning_efforts: list[str] | None = None,
@@ -260,6 +265,8 @@ class RequestLogsRepository:
             conditions.append(RequestLog.requested_at <= until)
         if account_ids:
             conditions.append(RequestLog.account_id.in_(account_ids))
+        if api_key_ids:
+            conditions.append(RequestLog.api_key_id.in_(api_key_ids))
 
         if model_options:
             pair_conditions = []

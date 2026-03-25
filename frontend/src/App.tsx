@@ -9,8 +9,19 @@ import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { AccountsPage } from "@/features/accounts/components/accounts-page";
 import { DashboardPage } from "@/features/dashboard/components/dashboard-page";
 import { SettingsPage } from "@/features/settings/components/settings-page";
+import { ViewerAuthGate } from "@/features/viewer-auth/components/viewer-auth-gate";
+import { useViewerAuthStore } from "@/features/viewer-auth/hooks/use-viewer-auth";
+import { ViewerDashboardPage } from "@/features/viewer/components/viewer-dashboard-page";
+import { ViewerPage } from "@/features/viewer/components/viewer-page";
+import { ViewerSettingsPage } from "@/features/viewer/components/viewer-settings-page";
 
-function AppLayout() {
+const VIEWER_NAV_ITEMS = [
+  { to: "/viewer/dashboard", label: "Dashboard" },
+  { to: "/viewer/quota", label: "Quota" },
+  { to: "/viewer/settings", label: "Settings" },
+] as const;
+
+function AdminAppLayout() {
   const logout = useAuthStore((state) => state.logout);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
 
@@ -30,21 +41,58 @@ function AppLayout() {
   );
 }
 
+function ViewerAppLayout() {
+  const logout = useViewerAuthStore((state) => state.logout);
+
+  return (
+    <div className="flex min-h-screen flex-col bg-background pb-10">
+      <AppHeader
+        navItems={VIEWER_NAV_ITEMS}
+        onLogout={() => {
+          void logout();
+        }}
+        showLogout
+      />
+      <main className="mx-auto w-full max-w-[1500px] flex-1 px-4 py-8 sm:px-6">
+        <Outlet />
+      </main>
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <TooltipProvider>
       <Toaster richColors />
-      <AuthGate>
-        <Routes>
-          <Route element={<AppLayout />}>
-            <Route path="/" element={<Navigate to="/dashboard" replace />} />
-            <Route path="/dashboard" element={<DashboardPage />} />
-            <Route path="/accounts" element={<AccountsPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/firewall" element={<Navigate to="/settings" replace />} />
-          </Route>
-        </Routes>
-      </AuthGate>
+      <Routes>
+        <Route
+          path="/viewer"
+          element={(
+            <ViewerAuthGate>
+              <ViewerAppLayout />
+            </ViewerAuthGate>
+          )}
+        >
+          <Route index element={<Navigate to="/viewer/dashboard" replace />} />
+          <Route path="dashboard" element={<ViewerDashboardPage />} />
+          <Route path="quota" element={<ViewerPage />} />
+          <Route path="settings" element={<ViewerSettingsPage />} />
+        </Route>
+
+        <Route
+          element={(
+            <AuthGate>
+              <AdminAppLayout />
+            </AuthGate>
+          )}
+        >
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/accounts" element={<AccountsPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/firewall" element={<Navigate to="/settings" replace />} />
+        </Route>
+      </Routes>
     </TooltipProvider>
   );
 }

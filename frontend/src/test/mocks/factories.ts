@@ -25,6 +25,10 @@ import type {
 } from "@/features/dashboard/schemas";
 import { AuthSessionSchema } from "@/features/auth/schemas";
 import type { AuthSession } from "@/features/auth/schemas";
+import { ViewerSessionSchema } from "@/features/viewer-auth/schemas";
+import type { ViewerSession } from "@/features/viewer-auth/schemas";
+import { ViewerApiKeySchema, ViewerApiKeyRegenerateResponseSchema } from "@/features/viewer/schemas";
+import type { ViewerApiKey, ViewerApiKeyRegenerateResponse } from "@/features/viewer/schemas";
 import { DashboardSettingsSchema } from "@/features/settings/schemas";
 import type { DashboardSettings } from "@/features/settings/schemas";
 import {
@@ -50,6 +54,9 @@ export type {
   OauthStatusResponse,
   ApiKey,
   ApiKeyCreateResponse,
+  ViewerSession,
+  ViewerApiKey,
+  ViewerApiKeyRegenerateResponse,
 };
 
 const BASE_TIME = new Date("2026-01-01T12:00:00Z");
@@ -395,6 +402,37 @@ export function createAccountTrends(
     accountId,
     primary: createUsageTrendPoints(80),
     secondary: createUsageTrendPoints(55),
+    ...overrides,
+  });
+}
+
+export function createViewerApiKey(overrides: Partial<ViewerApiKey> = {}): ViewerApiKey {
+  return ViewerApiKeySchema.parse({
+    ...createApiKey({
+      id: "viewer-key-1",
+      name: "Viewer Key",
+      keyPrefix: "sk-clb-viewer",
+    }),
+    maskedKey: "sk-clb-viewer...",
+    ...overrides,
+  });
+}
+
+export function createViewerSession(overrides: Partial<ViewerSession> = {}): ViewerSession {
+  return ViewerSessionSchema.parse({
+    authenticated: true,
+    apiKey: createViewerApiKey(),
+    canRegenerate: true,
+    ...overrides,
+  });
+}
+
+export function createViewerApiKeyRegenerateResponse(
+  overrides: Partial<ViewerApiKeyRegenerateResponse> = {},
+): ViewerApiKeyRegenerateResponse {
+  return ViewerApiKeyRegenerateResponseSchema.parse({
+    ...createViewerApiKey(),
+    key: "sk-clb-viewer-rotated",
     ...overrides,
   });
 }

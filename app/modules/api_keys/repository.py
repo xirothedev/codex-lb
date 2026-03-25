@@ -74,7 +74,10 @@ class ApiKeysRepository:
         return row
 
     async def get_by_id(self, key_id: str) -> ApiKey | None:
-        return await self._session.get(ApiKey, key_id)
+        result = await self._session.execute(
+            select(ApiKey).options(selectinload(ApiKey.limits)).where(ApiKey.id == key_id)
+        )
+        return result.scalar_one_or_none()
 
     async def get_by_hash(self, key_hash: str) -> ApiKey | None:
         result = await self._session.execute(
@@ -86,7 +89,7 @@ class ApiKeysRepository:
         result = await self._session.execute(select(ApiKey).order_by(ApiKey.created_at.desc()))
         return list(result.scalars().unique().all())
 
-    async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
+    async def list_usage_summary_by_key(self, key_ids: list[str] | None = None) -> dict[str, ApiKeyUsageSummary]:
         stmt = (
             select(
                 RequestLog.api_key_id,
@@ -103,6 +106,8 @@ class ApiKeysRepository:
             .where(RequestLog.api_key_id.is_not(None))
             .group_by(RequestLog.api_key_id, RequestLog.model, RequestLog.service_tier)
         )
+        if key_ids:
+            stmt = stmt.where(RequestLog.api_key_id.in_(key_ids))
         result = await self._session.execute(stmt)
         rollup: dict[str, dict[str, float | int]] = {}
         for (

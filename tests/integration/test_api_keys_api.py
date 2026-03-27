@@ -14,7 +14,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import utcnow
-from app.db.models import RequestLog
+from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 
@@ -1632,8 +1632,8 @@ async def test_allowed_but_unsupported_model_is_exposed(async_client):
 
 
 @pytest.mark.asyncio
-async def test_stream_401_retry_success_finalizes_once(async_client, monkeypatch):
-    """401 refresh retry 성공 시 finalize 1회만 호출되어 usage가 정확히 반영된다."""
+async def test_stream_401_failover_success_finalizes_once(async_client, monkeypatch):
+    """401 on the first account pauses it and finalizes usage once on alternate-account failover."""
     enable = await async_client.put(
         "/api/settings",
         json={
@@ -1659,12 +1659,15 @@ async def test_stream_401_retry_success_finalizes_once(async_client, monkeypatch
     key = payload["key"]
     key_id = payload["id"]
 
-    await _import_account(async_client, "acc_401_retry", "acc-401-retry@example.com")
+    first_account_id = await _import_account(async_client, "acc_401_retry_a", "acc-401-retry-a@example.com")
+    second_account_id = await _import_account(async_client, "acc_401_retry_b", "acc-401-retry-b@example.com")
 
     call_count = {"value": 0}
+    seen_account_ids: list[str | None] = []
 
     async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
         call_count["value"] += 1
+        seen_account_ids.append(_account_id)
         if call_count["value"] == 1:
             raise ProxyResponseError(
                 401,
@@ -1685,13 +1688,22 @@ async def test_stream_401_retry_success_finalizes_once(async_client, monkeypatch
         assert response.status_code == 200
         _ = [line async for line in response.aiter_lines() if line]
 
-    assert call_count["value"] == 2  # first failed, second succeeded
+    assert call_count["value"] == 2
+    assert seen_account_ids == ["acc_401_retry_a", "acc_401_retry_b"]
 
     async with SessionLocal() as session:
         repo = ApiKeysRepository(session)
         limits = await repo.get_limits_by_key(key_id)
         assert len(limits) == 1
-        assert limits[0].current_value == 30  # 20 input + 10 output, finalized once
+        assert limits[0].current_value == 30
+
+        paused_account = await session.get(Account, first_account_id)
+        active_account = await session.get(Account, second_account_id)
+        assert paused_account is not None
+        assert paused_account.status == AccountStatus.PAUSED
+        assert paused_account.deactivation_reason == "Auto-paused after upstream 401 during proxy traffic"
+        assert active_account is not None
+        assert active_account.status == AccountStatus.ACTIVE
 
 
 @pytest.mark.asyncio

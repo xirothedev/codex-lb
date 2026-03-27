@@ -4103,7 +4103,7 @@ async def test_compact_selection_budget_exhaustion_returns_upstream_unavailable(
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
     assert exc.payload["error"]["code"] == "upstream_unavailable"
-    assert request_logs.calls[0]["error_code"] == "no_accounts"
+    assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
 
 
 @pytest.mark.asyncio

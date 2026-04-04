@@ -4,8 +4,9 @@ import asyncio
 import json
 import logging
 from collections import deque
+from collections.abc import Sequence
 from types import SimpleNamespace
-from typing import Protocol, cast
+from typing import Protocol, Self, cast
 from unittest.mock import AsyncMock
 
 import anyio
@@ -21,14 +22,23 @@ from app.core.errors import openai_error
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.openai.parsing import parse_sse_event
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.resilience.circuit_breaker import CircuitState
+from app.core.types import JsonValue
 from app.core.utils.request_id import get_request_id, reset_request_id, set_request_id
 from app.core.utils.sse import parse_sse_data_json
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
+from app.modules.accounts.repository import AccountsRepository
+from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy import api as proxy_api
+from app.modules.proxy import request_policy as proxy_request_policy
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy.load_balancer import AccountSelection
+from app.modules.proxy.repo_bundle import ProxyRepositories
+from app.modules.proxy.sticky_repository import StickySessionsRepository
+from app.modules.request_logs.repository import RequestLogsRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 pytestmark = pytest.mark.unit
 
@@ -36,6 +46,14 @@ pytestmark = pytest.mark.unit
 def _assert_proxy_response_error(exc: BaseException) -> proxy_module.ProxyResponseError:
     assert isinstance(exc, proxy_module.ProxyResponseError)
     return exc
+
+
+def _proxy_error_code(exc: proxy_module.ProxyResponseError) -> str | None:
+    return exc.payload["error"].get("code")
+
+
+def _proxy_error_message(exc: proxy_module.ProxyResponseError) -> str | None:
+    return exc.payload["error"].get("message")
 
 
 def test_filter_inbound_headers_strips_auth_and_account():
@@ -93,6 +111,93 @@ def test_build_upstream_headers_accept_override():
     inbound = {}
     headers = _build_upstream_headers(inbound, "token", None, accept="application/json")
     assert headers["Accept"] == "application/json"
+
+
+def test_apply_api_key_enforcement_overrides_service_tier_aliases_to_priority():
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.4",
+            "instructions": "hello",
+            "input": [],
+            "service_tier": "default",
+        }
+    )
+    api_key = proxy_service.ApiKeyData(
+        id="key_1",
+        name="service-tier-key",
+        key_prefix="sk-clb-test",
+        allowed_models=None,
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier="priority",
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    proxy_request_policy.apply_api_key_enforcement(payload, api_key)
+
+    assert payload.service_tier == "priority"
+
+
+class _RingMembershipStub:
+    def __init__(self, members: list[str]) -> None:
+        self.members = members
+
+    async def list_active(self, stale_threshold_seconds: int = 120) -> list[str]:
+        del stale_threshold_seconds
+        return list(self.members)
+
+
+@pytest.mark.anyio
+async def test_owner_instance_uses_rendezvous_hash() -> None:
+    settings = SimpleNamespace(
+        http_responses_session_bridge_instance_id="pod-a",
+        http_responses_session_bridge_instance_ring=["pod-a", "pod-b", "pod-c", "pod-d", "pod-e"],
+    )
+    ring_membership = _RingMembershipStub(["pod-a", "pod-b", "pod-c", "pod-d", "pod-e"])
+
+    owners_before: dict[str, str | None] = {}
+    for index in range(1000):
+        key = proxy_service._HTTPBridgeSessionKey("prompt_cache_key", f"k-{index}", None)
+        owners_before[key.affinity_key] = await proxy_service._http_bridge_owner_instance(
+            key,
+            settings,
+            cast(proxy_service.RingMembershipService, ring_membership),
+        )
+
+    ring_membership.members = ["pod-a", "pod-b", "pod-c", "pod-d", "pod-e", "pod-f"]
+    moved = 0
+    for index in range(1000):
+        key = proxy_service._HTTPBridgeSessionKey("prompt_cache_key", f"k-{index}", None)
+        owner_after = await proxy_service._http_bridge_owner_instance(
+            key,
+            settings,
+            cast(proxy_service.RingMembershipService, ring_membership),
+        )
+        if owners_before[key.affinity_key] != owner_after:
+            moved += 1
+
+    assert moved / 1000 <= 0.2
+
+
+@pytest.mark.anyio
+async def test_ring_raises_on_db_error() -> None:
+    settings = SimpleNamespace(
+        http_responses_session_bridge_instance_id="pod-a",
+        http_responses_session_bridge_instance_ring=["pod-b", "pod-c"],
+    )
+    ring_membership = AsyncMock()
+    ring_membership.list_active.side_effect = RuntimeError("db unavailable")
+
+    key = proxy_service._HTTPBridgeSessionKey("prompt_cache_key", "k-fallback", None)
+    with pytest.raises(RuntimeError, match="db unavailable"):
+        await proxy_service._http_bridge_owner_instance(
+            key,
+            settings,
+            cast(proxy_service.RingMembershipService, ring_membership),
+        )
 
 
 def test_build_upstream_websocket_headers_strip_accept_and_content_type_case_insensitively():
@@ -274,17 +379,33 @@ def test_pop_sse_event_returns_first_event_and_mutates_buffer():
     assert bytes(buffer) == b"data: two\n\n"
 
 
-class _DummyContent:
-    def __init__(self, chunks: list[bytes]) -> None:
-        self._chunks = chunks
+class _DummyChunkIterator:
+    def __init__(self, chunks: Sequence[bytes]) -> None:
+        self._chunks = iter(chunks)
 
-    async def iter_chunked(self, size: int):
-        for chunk in self._chunks:
-            yield chunk
+    def __aiter__(self) -> Self:
+        return self
+
+    async def __anext__(self) -> bytes:
+        try:
+            return next(self._chunks)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
 
 
-class _DummyResponse:
-    def __init__(self, chunks: list[bytes]) -> None:
+class _DummyContent(proxy_module.SSEContentProtocol):
+    def __init__(self, chunks: Sequence[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    def iter_chunked(self, size: int) -> _DummyChunkIterator:
+        del size
+        return _DummyChunkIterator(self._chunks)
+
+
+class _DummyResponse(proxy_module.SSEResponseProtocol):
+    content: proxy_module.SSEContentProtocol
+
+    def __init__(self, chunks: Sequence[bytes]) -> None:
         self.content = _DummyContent(chunks)
 
 
@@ -354,16 +475,23 @@ class _RequestLogsRecorder:
 
 class _RepoContext:
     def __init__(self, request_logs: _RequestLogsRecorder) -> None:
-        self._repos = SimpleNamespace(request_logs=request_logs)
+        self._repos = ProxyRepositories(
+            accounts=cast(AccountsRepository, AsyncMock()),
+            usage=cast(UsageRepository, AsyncMock()),
+            request_logs=cast(RequestLogsRepository, request_logs),
+            sticky_sessions=cast(StickySessionsRepository, AsyncMock()),
+            api_keys=cast(ApiKeysRepository, AsyncMock()),
+            additional_usage=cast(AdditionalUsageRepository, AsyncMock()),
+        )
 
-    async def __aenter__(self) -> object:
+    async def __aenter__(self) -> ProxyRepositories:
         return self._repos
 
     async def __aexit__(self, exc_type, exc, tb) -> bool:
         return False
 
 
-def _repo_factory(request_logs: _RequestLogsRecorder):
+def _repo_factory(request_logs: _RequestLogsRecorder) -> proxy_service.ProxyRepoFactory:
     def factory() -> _RepoContext:
         return _RepoContext(request_logs)
 
@@ -374,6 +502,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
     return SimpleNamespace(
         prefer_earlier_reset_accounts=False,
         sticky_threads_enabled=False,
+        sticky_reallocation_budget_threshold_pct=95.0,
         upstream_stream_transport="default",
         openai_cache_affinity_max_age_seconds=300,
         openai_prompt_cache_key_derivation_enabled=True,
@@ -387,6 +516,13 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
         log_proxy_request_shape_raw_cache_key=False,
         log_proxy_service_tier_trace=log_proxy_service_tier_trace,
     )
+
+
+@pytest.fixture(autouse=True)
+def _install_default_proxy_runtime_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
 
 
 def _make_account(account_id: str) -> Account:
@@ -424,9 +560,13 @@ class _JsonCompactResponse:
 
 class _CompactSession:
     class _CompactResponseLike(Protocol):
-        async def __aenter__(self): ...
-        async def __aexit__(self, exc_type, exc, tb): ...
-        async def json(self, *, content_type=None): ...
+        status: int
+
+        async def __aenter__(self) -> Self: ...
+
+        async def __aexit__(self, exc_type: object | None, exc: BaseException | None, tb: object | None) -> bool: ...
+
+        async def json(self, *, content_type: str | None = None) -> dict[str, object]: ...
 
     def __init__(self, response: _CompactResponseLike) -> None:
         self._response = response
@@ -498,15 +638,15 @@ class _TimeoutCompactSession:
 
 
 class _WsConnection:
-    def __init__(self, messages: list[object]) -> None:
+    def __init__(self, messages: Sequence[object]) -> None:
         self._messages = list(messages)
         self.sent_json: list[dict[str, object]] = []
         self.closed = False
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type: object | None, exc: BaseException | None, tb: object | None) -> bool:
         self.closed = True
         return False
 
@@ -531,7 +671,7 @@ def _ws_text_message(payload: dict[str, object]) -> SimpleNamespace:
 
 
 class _WsResponse:
-    def __init__(self, messages: list[object], *, status: int = 101) -> None:
+    def __init__(self, messages: Sequence[object], *, status: int = 101) -> None:
         self._messages = messages
         self._index = 0
         self._response = SimpleNamespace(status=status)
@@ -539,14 +679,14 @@ class _WsResponse:
         self.sent_json: list[dict[str, object]] = []
         self.sent: list[str] = []
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type: object | None, exc: BaseException | None, tb: object | None) -> bool:
         self.closed = True
         return False
 
-    def __aiter__(self):
+    def __aiter__(self) -> Self:
         return self
 
     async def __anext__(self):
@@ -639,8 +779,9 @@ async def test_iter_sse_events_handles_large_single_line_without_chunk_too_big()
     large_data = "A" * (200 * 1024)
     event = f'data: {{"type":"response.output_text.delta","delta":"{large_data}"}}\n\n'.encode("utf-8")
     response = _DummyResponse([event[:4096], event[4096:]])
+    stream = proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 1.0, 512 * 1024)
 
-    chunks = [chunk async for chunk in proxy_module._iter_sse_events(response, 1.0, 512 * 1024)]
+    chunks = [chunk async for chunk in stream]
 
     assert len(chunks) == 1
     assert chunks[0].startswith("data: ")
@@ -653,7 +794,7 @@ async def test_iter_sse_events_raises_on_event_size_limit():
     response = _DummyResponse([b"data: ", large_data])
 
     with pytest.raises(proxy_module.StreamEventTooLargeError):
-        async for _ in proxy_module._iter_sse_events(response, 1.0, 256):
+        async for _ in proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 1.0, 256):
             pass
 
 
@@ -669,7 +810,7 @@ async def test_iter_sse_events_raises_idle_timeout(monkeypatch):
     monkeypatch.setattr(proxy_module.asyncio, "wait", fake_wait)
 
     with pytest.raises(proxy_module.StreamIdleTimeoutError):
-        async for _ in proxy_module._iter_sse_events(response, 1.0, 1024):
+        async for _ in proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 1.0, 1024):
             pass
 
 
@@ -686,7 +827,7 @@ async def test_iter_sse_events_propagates_upstream_timeout():
             self.content = _TimeoutContent()
 
     with pytest.raises(asyncio.TimeoutError):
-        async for _ in proxy_module._iter_sse_events(_TimeoutResponse(), 1.0, 1024):
+        async for _ in proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, _TimeoutResponse()), 1.0, 1024):
             pass
 
 
@@ -712,7 +853,7 @@ async def test_iter_sse_events_cancels_pending_chunk_read():
     response = _BlockingResponse()
 
     async def consume() -> None:
-        async for _ in proxy_module._iter_sse_events(response, 10.0, 1024):
+        async for _ in proxy_module._iter_sse_events(cast(proxy_module.SSEResponse, response), 10.0, 1024):
             pass
 
     task = asyncio.create_task(consume())
@@ -1484,7 +1625,10 @@ async def test_stream_responses_via_websocket_counts_connect_and_send_against_to
         headers,
         connect_timeout_seconds: float,
         max_msg_size: int,
+        account_id: str | None = None,
+        hold_half_open_probe: bool = False,
     ):
+        del session, url, headers, max_msg_size, account_id, hold_half_open_probe
         recorded["connect_timeout_seconds"] = connect_timeout_seconds
         return websocket, websocket
 
@@ -1563,6 +1707,488 @@ async def test_open_upstream_websocket_preserves_error_body_on_handshake_failure
         )
 
     assert "insufficient_quota" in exc_info.value.message
+
+
+@pytest.mark.asyncio
+async def test_open_upstream_websocket_records_circuit_breaker_failure_on_5xx_handshake(monkeypatch):
+    class _CircuitBreakerStub:
+        def __init__(self) -> None:
+            self.state = CircuitState.CLOSED
+            self.failures: list[Exception] = []
+            self.successes = 0
+
+        async def pre_call_check(self) -> bool:
+            return False
+
+        async def release_half_open_probe(self) -> None:
+            pass
+
+        async def _record_failure(self, exc: Exception) -> None:
+            self.failures.append(exc)
+
+        async def _record_success(self) -> None:
+            self.successes += 1
+
+    class _HandshakeFailureResponse:
+        def __init__(self) -> None:
+            self.status = 503
+            self.headers = {}
+            self.request_info = SimpleNamespace(real_url="wss://chatgpt.com/backend-api/codex/responses")
+            self.history = ()
+            self.connection = None
+
+        async def text(self) -> str:
+            return "upstream unavailable"
+
+        def close(self) -> None:
+            return None
+
+    class _HandshakeFailureSession:
+        def __init__(self) -> None:
+            self._loop = asyncio.get_running_loop()
+            self._ws_response_class = proxy_module.aiohttp.ClientWebSocketResponse
+
+        async def request(self, method, url, **kwargs):
+            del method, url, kwargs
+            return _HandshakeFailureResponse()
+
+    cb = _CircuitBreakerStub()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: cb)
+
+    with pytest.raises(proxy_module.aiohttp.WSServerHandshakeError):
+        await proxy_module._open_upstream_websocket(
+            session=cast(proxy_module.aiohttp.ClientSession, _HandshakeFailureSession()),
+            url="wss://chatgpt.com/backend-api/codex/responses",
+            headers={"Authorization": "Bearer token"},
+            connect_timeout_seconds=8.0,
+            max_msg_size=1024,
+            account_id="acc_test",
+        )
+
+    assert cb.successes == 0
+    assert len(cb.failures) == 1
+    assert str(cb.failures[0]) == "WebSocket handshake failed: HTTP 503"
+
+
+@pytest.mark.asyncio
+async def test_open_upstream_websocket_records_circuit_breaker_success_after_valid_handshake(monkeypatch):
+    class _CircuitBreakerStub:
+        def __init__(self) -> None:
+            self.state = CircuitState.CLOSED
+            self.failures: list[Exception] = []
+            self.successes = 0
+
+        async def pre_call_check(self) -> bool:
+            return False
+
+        async def release_half_open_probe(self) -> None:
+            pass
+
+        async def _record_failure(self, exc: Exception) -> None:
+            self.failures.append(exc)
+
+        async def _record_success(self) -> None:
+            self.successes += 1
+
+    class _ProtocolStub:
+        def __init__(self) -> None:
+            self.read_timeout: float | None = 10.0
+
+        def set_parser(self, parser, reader) -> None:
+            del parser, reader
+
+    class _ConnectionStub:
+        def __init__(self) -> None:
+            self.protocol = _ProtocolStub()
+            self.transport = object()
+
+    class _HandshakeSuccessResponse:
+        def __init__(self, headers: dict[str, str]) -> None:
+            self.status = 101
+            self.headers = headers
+            self.request_info = SimpleNamespace(real_url="wss://chatgpt.com/backend-api/codex/responses")
+            self.history = ()
+            self.connection = _ConnectionStub()
+
+        async def text(self) -> str:
+            return ""
+
+        def close(self) -> None:
+            return None
+
+    class _HandshakeSuccessSession:
+        def __init__(self) -> None:
+            self._loop = asyncio.get_running_loop()
+
+            def _build_ws(*args, **kwargs):
+                del args, kwargs
+                return SimpleNamespace(tag="ws")
+
+            self._ws_response_class = _build_ws
+
+        async def request(self, method, url, **kwargs):
+            del method, url
+            sec_key = kwargs["headers"][proxy_module.hdrs.SEC_WEBSOCKET_KEY]
+            response_key = proxy_module.base64.b64encode(
+                proxy_module.hashlib.sha1(sec_key.encode() + proxy_module.WS_KEY).digest()
+            ).decode()
+            return _HandshakeSuccessResponse(
+                {
+                    proxy_module.hdrs.UPGRADE: "websocket",
+                    proxy_module.hdrs.CONNECTION: "upgrade",
+                    proxy_module.hdrs.SEC_WEBSOCKET_ACCEPT: response_key,
+                }
+            )
+
+    cb = _CircuitBreakerStub()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: cb)
+    monkeypatch.setattr(proxy_module.aiohttp.client_ws, "WebSocketDataQueue", lambda *args, **kwargs: object())
+    monkeypatch.setattr(proxy_module, "WebSocketReader", lambda *args, **kwargs: object())
+    monkeypatch.setattr(proxy_module, "WebSocketWriter", lambda *args, **kwargs: object())
+
+    websocket_cm, websocket = await proxy_module._open_upstream_websocket(
+        session=cast(proxy_module.aiohttp.ClientSession, _HandshakeSuccessSession()),
+        url="wss://chatgpt.com/backend-api/codex/responses",
+        headers={"Authorization": "Bearer token"},
+        connect_timeout_seconds=8.0,
+        max_msg_size=1024,
+        account_id="acc_test",
+    )
+
+    assert websocket_cm == websocket
+    assert cb.failures == []
+    assert cb.successes == 0
+
+
+@pytest.mark.asyncio
+async def test_open_upstream_websocket_holds_half_open_probe_until_lifecycle_finishes(monkeypatch):
+    class _CircuitBreakerStub:
+        def __init__(self) -> None:
+            self.state = CircuitState.CLOSED
+            self.failures: list[Exception] = []
+            self.successes = 0
+            self.release_calls = 0
+
+        async def pre_call_check(self) -> bool:
+            return True
+
+        async def release_half_open_probe(self) -> None:
+            self.release_calls += 1
+
+        async def _record_failure(self, exc: Exception) -> None:
+            self.failures.append(exc)
+
+        async def _record_success(self) -> None:
+            self.successes += 1
+
+    class _ProtocolStub:
+        def __init__(self) -> None:
+            self.read_timeout: float | None = 10.0
+
+        def set_parser(self, parser, reader) -> None:
+            del parser, reader
+
+    class _ConnectionStub:
+        def __init__(self) -> None:
+            self.protocol = _ProtocolStub()
+            self.transport = object()
+
+    class _HandshakeSuccessResponse:
+        def __init__(self, headers: dict[str, str]) -> None:
+            self.status = 101
+            self.headers = headers
+            self.request_info = SimpleNamespace(real_url="wss://chatgpt.com/backend-api/codex/responses")
+            self.history = ()
+            self.connection = _ConnectionStub()
+
+        async def text(self) -> str:
+            return ""
+
+        def close(self) -> None:
+            return None
+
+    class _HandshakeSuccessSession:
+        def __init__(self) -> None:
+            self._loop = asyncio.get_running_loop()
+
+            def _build_ws(*args, **kwargs):
+                del args, kwargs
+                return SimpleNamespace(tag="ws")
+
+            self._ws_response_class = _build_ws
+
+        async def request(self, method, url, **kwargs):
+            del method, url
+            sec_key = kwargs["headers"][proxy_module.hdrs.SEC_WEBSOCKET_KEY]
+            response_key = proxy_module.base64.b64encode(
+                proxy_module.hashlib.sha1(sec_key.encode() + proxy_module.WS_KEY).digest()
+            ).decode()
+            return _HandshakeSuccessResponse(
+                {
+                    proxy_module.hdrs.UPGRADE: "websocket",
+                    proxy_module.hdrs.CONNECTION: "upgrade",
+                    proxy_module.hdrs.SEC_WEBSOCKET_ACCEPT: response_key,
+                }
+            )
+
+    cb = _CircuitBreakerStub()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: cb)
+    monkeypatch.setattr(proxy_module.aiohttp.client_ws, "WebSocketDataQueue", lambda *args, **kwargs: object())
+    monkeypatch.setattr(proxy_module, "WebSocketReader", lambda *args, **kwargs: object())
+    monkeypatch.setattr(proxy_module, "WebSocketWriter", lambda *args, **kwargs: object())
+
+    _, websocket = await proxy_module._open_upstream_websocket(
+        session=cast(proxy_module.aiohttp.ClientSession, _HandshakeSuccessSession()),
+        url="wss://chatgpt.com/backend-api/codex/responses",
+        headers={"Authorization": "Bearer token"},
+        connect_timeout_seconds=8.0,
+        max_msg_size=1024,
+        account_id="acc_test",
+        hold_half_open_probe=True,
+    )
+
+    assert cb.release_calls == 0
+    assert getattr(websocket, "_codex_lb_half_open_probe_held", False) is True
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_websocket_records_circuit_breaker_success_after_terminal_event(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "websocket"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+        circuit_breaker_enabled = True
+
+    class _CircuitBreakerStub:
+        def __init__(self) -> None:
+            self.failures: list[Exception] = []
+            self.successes = 0
+
+        async def _record_failure(self, exc: Exception) -> None:
+            self.failures.append(exc)
+
+        async def _record_success(self) -> None:
+            self.successes += 1
+
+    websocket = _WsResponse(
+        [
+            _WsMessage(
+                proxy_module.aiohttp.WSMsgType.TEXT,
+                json.dumps({"type": "response.completed", "response": {"id": "resp_ws"}}),
+            )
+        ]
+    )
+    breaker = _CircuitBreakerStub()
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    async def fake_open_upstream_websocket(**kwargs):
+        del kwargs
+        return websocket, websocket
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: breaker)
+    monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    _ = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, _WsSession(websocket)),
+        )
+    ]
+
+    assert breaker.successes == 1
+    assert breaker.failures == []
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_websocket_records_circuit_breaker_failure_when_stream_closes_without_terminal(
+    monkeypatch,
+):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "websocket"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+        circuit_breaker_enabled = True
+
+    class _CircuitBreakerStub:
+        def __init__(self) -> None:
+            self.failures: list[Exception] = []
+            self.successes = 0
+
+        async def _record_failure(self, exc: Exception) -> None:
+            self.failures.append(exc)
+
+        async def _record_success(self) -> None:
+            self.successes += 1
+
+    websocket = _WsResponse([])
+    breaker = _CircuitBreakerStub()
+    payload = ResponsesRequest.model_validate(
+        {"model": "gpt-5.1", "instructions": "hi", "input": [{"role": "user", "content": "hi"}]}
+    )
+
+    async def fake_open_upstream_websocket(**kwargs):
+        del kwargs
+        return websocket, websocket
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: breaker)
+    monkeypatch.setattr(proxy_module, "_open_upstream_websocket", fake_open_upstream_websocket)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    events = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, _WsSession(websocket)),
+        )
+    ]
+
+    assert breaker.successes == 0
+    assert len(breaker.failures) == 1
+    assert any("stream_incomplete" in event for event in events)
+
+
+@pytest.mark.asyncio
+async def test_open_upstream_websocket_raises_when_circuit_breaker_is_open(monkeypatch):
+    class _CircuitBreakerStub:
+        def __init__(self) -> None:
+            self.state = CircuitState.OPEN
+            self.failures: list[Exception] = []
+            self.successes = 0
+
+        async def pre_call_check(self) -> bool:
+            from app.core.resilience.circuit_breaker import CircuitBreakerOpenError
+
+            raise CircuitBreakerOpenError("Circuit breaker is OPEN")
+
+        async def release_half_open_probe(self) -> None:
+            pass
+
+        async def _record_failure(self, exc: Exception) -> None:
+            self.failures.append(exc)
+
+        async def _record_success(self) -> None:
+            self.successes += 1
+
+    called = False
+
+    class _Session:
+        def __init__(self) -> None:
+            self._loop = asyncio.get_running_loop()
+            self._ws_response_class = proxy_module.aiohttp.ClientWebSocketResponse
+
+        async def request(self, method, url, **kwargs):
+            nonlocal called
+            called = True
+            del method, url, kwargs
+            raise AssertionError("request should not be called when circuit is open")
+
+    cb = _CircuitBreakerStub()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: cb)
+
+    with pytest.raises(proxy_module.CircuitBreakerOpenError):
+        await proxy_module._open_upstream_websocket(
+            session=cast(proxy_module.aiohttp.ClientSession, _Session()),
+            url="wss://chatgpt.com/backend-api/codex/responses",
+            headers={"Authorization": "Bearer token"},
+            connect_timeout_seconds=8.0,
+            max_msg_size=1024,
+            account_id="acc_test",
+        )
+
+    assert called is False
+    assert cb.failures == []
+    assert cb.successes == 0
+
+
+@pytest.mark.asyncio
+async def test_open_upstream_websocket_malformed_101_records_failure(monkeypatch):
+    class _CircuitBreakerStub:
+        def __init__(self) -> None:
+            self.state = CircuitState.CLOSED
+            self.failures: list[Exception] = []
+            self.successes = 0
+
+        async def pre_call_check(self) -> bool:
+            return False
+
+        async def release_half_open_probe(self) -> None:
+            pass
+
+        async def _record_failure(self, exc: Exception) -> None:
+            self.failures.append(exc)
+
+        async def _record_success(self) -> None:
+            self.successes += 1
+
+    class _Malformed101Response:
+        def __init__(self) -> None:
+            self.status = 101
+            self.headers = {"Upgrade": "WRONG", "Connection": "Upgrade"}
+            self.request_info = SimpleNamespace(real_url="wss://chatgpt.com/backend-api/codex/responses")
+            self.history = ()
+            self.connection = None
+
+        async def text(self) -> str:
+            return ""
+
+        def close(self) -> None:
+            return None
+
+    class _Malformed101Session:
+        def __init__(self) -> None:
+            self._loop = asyncio.get_running_loop()
+            self._ws_response_class = proxy_module.aiohttp.ClientWebSocketResponse
+
+        async def request(self, method, url, **kwargs):
+            del method, url, kwargs
+            return _Malformed101Response()
+
+    cb = _CircuitBreakerStub()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _settings: cb)
+
+    with pytest.raises(proxy_module.aiohttp.WSServerHandshakeError):
+        await proxy_module._open_upstream_websocket(
+            session=cast(proxy_module.aiohttp.ClientSession, _Malformed101Session()),
+            url="wss://chatgpt.com/backend-api/codex/responses",
+            headers={"Authorization": "Bearer token"},
+            connect_timeout_seconds=8.0,
+            max_msg_size=1024,
+            account_id="acc_test",
+        )
+
+    assert cb.successes == 0
+    assert len(cb.failures) == 1
 
 
 @pytest.mark.asyncio
@@ -2006,7 +2632,7 @@ async def test_stream_responses_forced_websocket_preserves_rate_limit_code_on_ha
             )
         ]
 
-    assert exc_info.value.payload["error"]["code"] == "rate_limit_exceeded"
+    assert _proxy_error_code(exc_info.value) == "rate_limit_exceeded"
 
 
 @pytest.mark.asyncio
@@ -2263,8 +2889,8 @@ async def test_compact_responses_uses_configured_timeout_and_maps_read_timeout(m
     assert timeout.sock_read == pytest.approx(123.0, abs=0.05)
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
-    assert exc.payload["error"]["message"] == "Timeout on reading data from socket"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_message(exc) == "Timeout on reading data from socket"
 
 
 @pytest.mark.asyncio
@@ -3235,6 +3861,7 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
         allowed_models=["gpt-5.1"],
         enforced_model=None,
         enforced_reasoning_effort=None,
+        enforced_service_tier=None,
         expires_at=None,
         is_active=True,
         created_at=utcnow(),
@@ -3247,6 +3874,7 @@ async def test_prepare_websocket_response_create_request_normalizes_payload_and_
         allowed_models=["gpt-5.2"],
         enforced_model="gpt-5.2",
         enforced_reasoning_effort="high",
+        enforced_service_tier=None,
         expires_at=None,
         is_active=True,
         created_at=utcnow(),
@@ -3313,6 +3941,7 @@ async def test_prepare_websocket_response_create_request_logs_affinity_metadata(
         allowed_models=["gpt-5.1"],
         enforced_model=None,
         enforced_reasoning_effort=None,
+        enforced_service_tier=None,
         expires_at=None,
         is_active=True,
         created_at=utcnow(),
@@ -3450,7 +4079,7 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
     monkeypatch.setattr(service, "_handle_stream_error", handle_stream_error)
     monkeypatch.setattr(service, "_settle_stream_api_key_usage", AsyncMock(return_value=True))
 
-    completed_payload = {
+    completed_payload: dict[str, JsonValue] = {
         "type": "response.completed",
         "response": {
             "id": "resp_ws_complete",
@@ -3485,7 +4114,7 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
     handle_stream_error.assert_not_awaited()
     assert completed_upstream_control.reconnect_requested is False
 
-    failed_payload = {
+    failed_payload: dict[str, JsonValue] = {
         "type": "response.failed",
         "response": {
             "id": "resp_ws_failed",
@@ -3525,7 +4154,7 @@ async def test_finalize_websocket_request_state_updates_balancer_state(monkeypat
 
     record_success.reset_mock()
     handle_stream_error.reset_mock()
-    incomplete_payload = {
+    incomplete_payload: dict[str, JsonValue] = {
         "type": "response.incomplete",
         "response": {
             "id": "resp_ws_incomplete",
@@ -3702,8 +4331,7 @@ async def test_stream_failover_refresh_timeout_emits_upstream_unavailable_and_lo
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
-    first_account = _make_account("acc_stream_forced_refresh_timeout_first")
-    second_account = _make_account("acc_stream_forced_refresh_timeout_second")
+    account = _make_account("acc_stream_forced_refresh_timeout")
     pause_account = AsyncMock()
 
     monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SettingsCache(settings))
@@ -3711,25 +4339,21 @@ async def test_stream_failover_refresh_timeout_emits_upstream_unavailable_and_lo
     monkeypatch.setattr(
         service._load_balancer,
         "select_account",
-        AsyncMock(
-            side_effect=[
-                AccountSelection(account=first_account, error_message=None),
-                AccountSelection(account=second_account, error_message=None),
-            ]
-        ),
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None)),
     )
 
-    async def fake_ensure_fresh(account, *, force: bool = False, timeout_seconds: float | None = None):
-        if account.id == second_account.id:
+    async def fake_ensure_fresh_with_budget(acct, *, force: bool = False, timeout_seconds: float | None = None):
+        if force:
             raise asyncio.TimeoutError
-        return account
+        return acct
 
     async def failing_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         raise proxy_module.ProxyResponseError(401, openai_error("invalid_api_key", "token expired"))
         if False:
             yield ""
 
-    monkeypatch.setattr(service, "_ensure_fresh", fake_ensure_fresh)
+    monkeypatch.setattr(service, "_ensure_fresh", AsyncMock(return_value=account))
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(service, "_pause_account_for_upstream_401", pause_account)
     monkeypatch.setattr(proxy_service, "core_stream_responses", failing_stream)
 
@@ -3740,8 +4364,8 @@ async def test_stream_failover_refresh_timeout_emits_upstream_unavailable_and_lo
     event = json.loads(chunks[0].split("data: ", 1)[1])
     assert event["response"]["error"]["code"] == "upstream_unavailable"
     assert event["response"]["error"]["message"] == "Request to upstream timed out"
-    pause_account.assert_awaited_once_with(first_account)
-    assert request_logs.calls[-1]["account_id"] == second_account.id
+    pause_account.assert_awaited_once_with(account)
+    assert request_logs.calls[-1]["account_id"] == account.id
     assert request_logs.calls[-1]["status"] == "error"
     assert request_logs.calls[-1]["error_code"] == "upstream_unavailable"
     assert request_logs.calls[-1]["error_message"] == "Request to upstream timed out"
@@ -4039,7 +4663,7 @@ async def test_compact_responses_budget_exhaustion_returns_upstream_unavailable(
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
     assert request_logs.calls[0]["transport"] == "http"
 
@@ -4076,7 +4700,7 @@ async def test_compact_responses_records_transient_error_for_generic_upstream_fa
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
     record_error.assert_awaited_once_with(account)
     record_success.assert_not_awaited()
 
@@ -4102,8 +4726,34 @@ async def test_compact_selection_budget_exhaustion_returns_upstream_unavailable(
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_select_account_with_budget_times_out_during_settings_fetch(monkeypatch):
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    select_account = AsyncMock(return_value=AccountSelection(account=_make_account("acc_budget"), error_message=None))
+
+    class _SlowSettingsCache:
+        async def get(self) -> object:
+            await anyio.sleep(0.05)
+            return settings
+
+    monkeypatch.setattr(proxy_service, "get_settings_cache", lambda: _SlowSettingsCache())
+    monkeypatch.setattr(proxy_service, "_remaining_budget_seconds", lambda _deadline: 0.01)
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._select_account_with_budget(deadline=123.0, request_id="req-budget", kind="compact")
+
+    exc = _assert_proxy_response_error(exc_info.value)
+    assert exc.status_code == 502
+    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_message(exc) == "Proxy request budget exhausted"
+    select_account.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -4190,7 +4840,7 @@ async def test_transcribe_selection_budget_exhaustion_returns_upstream_unavailab
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
     assert request_logs.calls[0]["error_code"] == "upstream_unavailable"
 
 
@@ -4241,7 +4891,7 @@ async def test_transcribe_records_transient_error_for_generic_upstream_failure(m
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
     record_error.assert_awaited_once_with(account)
     record_success.assert_not_awaited()
 
@@ -4279,7 +4929,7 @@ async def test_compact_responses_propagates_selection_error_code(monkeypatch):
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 503
-    assert exc.payload["error"]["code"] == "no_additional_quota_eligible_accounts"
+    assert _proxy_error_code(exc) == "no_additional_quota_eligible_accounts"
     assert request_logs.calls[0]["error_code"] == "no_additional_quota_eligible_accounts"
 
 
@@ -4341,8 +4991,8 @@ async def test_transcribe_audio_wraps_timeout_as_upstream_unavailable():
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
-    assert exc.payload["error"]["message"] == "Request to upstream timed out"
+    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_message(exc) == "Request to upstream timed out"
 
 
 @pytest.mark.asyncio
@@ -4439,5 +5089,152 @@ async def test_transcribe_audio_maps_body_read_transport_errors_to_upstream_unav
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert exc.status_code == 502
-    assert exc.payload["error"]["code"] == "upstream_unavailable"
-    assert exc.payload["error"]["message"] == expected_message
+    assert _proxy_error_code(exc) == "upstream_unavailable"
+    assert _proxy_error_message(exc) == expected_message
+
+
+class _CBStub:
+    def __init__(self) -> None:
+        self.failures: list[Exception] = []
+        self.successes: int = 0
+
+    async def pre_call_check(self) -> bool:
+        return False
+
+    async def release_half_open_probe(self) -> None:
+        pass
+
+    async def _record_failure(self, exc: Exception) -> None:
+        self.failures.append(exc)
+
+    async def _record_success(self) -> None:
+        self.successes += 1
+
+
+@pytest.mark.asyncio
+async def test_cb_context_normal_200_records_success(monkeypatch):
+    cb = _CBStub()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _s: cb)
+
+    resp = SimpleNamespace(status=200)
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_cm():
+        yield resp
+
+    async with proxy_module._service_circuit_breaker_context(_fake_cm(), account_id="acc_test") as r:
+        assert r.status == 200
+
+    assert cb.successes == 1
+    assert cb.failures == []
+
+
+@pytest.mark.asyncio
+async def test_cb_context_4xx_caller_raises_records_success(monkeypatch):
+    cb = _CBStub()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _s: cb)
+
+    resp = SimpleNamespace(status=429)
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_cm():
+        yield resp
+
+    class _ClientError(Exception):
+        status_code = 429
+
+    with pytest.raises(_ClientError):
+        async with proxy_module._service_circuit_breaker_context(_fake_cm(), account_id="acc_test"):
+            raise _ClientError("rate limited")
+
+    assert cb.successes == 1
+    assert cb.failures == []
+
+
+@pytest.mark.asyncio
+async def test_cb_context_200_body_timeout_records_failure(monkeypatch):
+    cb = _CBStub()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _s: cb)
+
+    resp = SimpleNamespace(status=200)
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_cm():
+        yield resp
+
+    with pytest.raises(asyncio.TimeoutError):
+        async with proxy_module._service_circuit_breaker_context(_fake_cm(), account_id="acc_test"):
+            raise asyncio.TimeoutError("body read timeout")
+
+    assert cb.successes == 0
+    assert len(cb.failures) == 1
+
+
+@pytest.mark.asyncio
+async def test_cb_context_connection_failure_records_failure(monkeypatch):
+    cb = _CBStub()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _s: cb)
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_cm():
+        raise ConnectionError("upstream unreachable")
+        yield  # pragma: no cover
+
+    with pytest.raises(ConnectionError):
+        async with proxy_module._service_circuit_breaker_context(_fake_cm(), account_id="acc_test"):
+            pass  # pragma: no cover
+
+    assert cb.successes == 0
+    assert len(cb.failures) == 1
+
+
+@pytest.mark.asyncio
+async def test_cb_context_open_circuit_closes_request_context_manager(monkeypatch):
+    class _OpenCircuitCB:
+        async def pre_call_check(self) -> bool:
+            raise proxy_module.CircuitBreakerOpenError("open")
+
+        async def release_half_open_probe(self) -> None:
+            pass
+
+        async def _record_failure(self, exc: Exception) -> None:
+            del exc
+
+        async def _record_success(self) -> None:
+            pass
+
+    class _RequestCM:
+        def __init__(self) -> None:
+            self.close_called = False
+
+        def close(self) -> None:
+            self.close_called = True
+
+        async def __aenter__(self):
+            raise AssertionError("context manager should not be entered")
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+
+    cb = _OpenCircuitCB()
+    cm = _RequestCM()
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: SimpleNamespace(circuit_breaker_enabled=True))
+    monkeypatch.setattr(proxy_module, "get_circuit_breaker_for_account", lambda _aid, _s: cb)
+
+    with pytest.raises(proxy_module.CircuitBreakerOpenError):
+        async with proxy_module._service_circuit_breaker_context(cm, account_id="acc_test"):
+            pass  # pragma: no cover
+
+    assert cm.close_called is True

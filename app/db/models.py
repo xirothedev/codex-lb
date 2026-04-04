@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from enum import Enum
 
@@ -127,9 +128,30 @@ class RequestLog(Base):
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    actor_ip: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+
+class SchedulerLeader(Base):
+    __tablename__ = "scheduler_leader"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    leader_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
 class StickySession(Base):
@@ -172,8 +194,8 @@ class DashboardSettings(Base):
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     routing_strategy: Mapped[str] = mapped_column(
         String,
-        default="usage_weighted",
-        server_default=text("'usage_weighted'"),
+        default="capacity_weighted",
+        server_default=text("'capacity_weighted'"),
         nullable=False,
     )
     openai_cache_affinity_max_age_seconds: Mapped[int] = mapped_column(
@@ -201,6 +223,18 @@ class DashboardSettings(Base):
     )
     totp_secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     totp_last_verified_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    http_responses_session_bridge_prompt_cache_idle_ttl_seconds: Mapped[int] = mapped_column(
+        Integer,
+        default=3600,
+        server_default=text("3600"),
+        nullable=False,
+    )
+    sticky_reallocation_budget_threshold_pct: Mapped[float] = mapped_column(
+        Float,
+        default=95.0,
+        server_default=text("95.0"),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -227,6 +261,7 @@ class ApiKey(Base):
     allowed_models: Mapped[str | None] = mapped_column(Text, nullable=True)
     enforced_model: Mapped[str | None] = mapped_column(String, nullable=True)
     enforced_reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
+    enforced_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
@@ -353,6 +388,32 @@ class ApiKeyUsageReservationItem(Base):
     limit: Mapped[ApiKeyLimit] = relationship("ApiKeyLimit")
 
 
+class RateLimitAttempt(Base):
+    __tablename__ = "rate_limit_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), nullable=False)
+    type: Mapped[str] = mapped_column(String(50), nullable=False)
+
+
+class CacheInvalidation(Base):
+    __tablename__ = "cache_invalidation"
+
+    namespace: Mapped[str] = mapped_column(String(50), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
+class BridgeRingMember(Base):
+    __tablename__ = "bridge_ring_members"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    instance_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=func.now())
+    metadata_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 _PRIMARY_WINDOW_INDEX_EXPR = func.coalesce(UsageHistory.window, literal_column("'primary'"))
 
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)
@@ -404,6 +465,12 @@ Index("idx_api_key_usage_reservations_status", ApiKeyUsageReservation.status)
 Index("idx_api_key_usage_res_items_reservation_id", ApiKeyUsageReservationItem.reservation_id)
 Index("ix_additional_usage_history_account_id", AdditionalUsageHistory.account_id)
 Index("ix_additional_usage_history_recorded_at", AdditionalUsageHistory.recorded_at)
+Index(
+    "ix_rate_limit_attempts_type_key_attempted_at",
+    RateLimitAttempt.type,
+    RateLimitAttempt.key,
+    RateLimitAttempt.attempted_at,
+)
 Index(
     "ix_additional_usage_history_composite",
     AdditionalUsageHistory.account_id,

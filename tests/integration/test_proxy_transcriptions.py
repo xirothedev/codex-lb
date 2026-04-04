@@ -203,11 +203,16 @@ async def test_backend_transcribe_401_pauses_failed_account_and_fails_over(async
     )
     assert response.status_code == 200
     assert response.json()["text"] == "retried"
-    assert captured_account_ids == [first_account_id, second_account_id]
+    assert len(captured_account_ids) == 2
+    assert set(captured_account_ids) == {first_account_id, second_account_id}
+    failed_account_id = captured_account_ids[0]
+    fallback_account_id = captured_account_ids[1]
+    failed_email = first_email if failed_account_id == first_account_id else second_email
+    fallback_email = second_email if failed_account_id == first_account_id else first_email
 
     async with SessionLocal() as session:
-        failed = await session.get(Account, generate_unique_account_id(first_account_id, first_email))
-        fallback = await session.get(Account, generate_unique_account_id(second_account_id, second_email))
+        failed = await session.get(Account, generate_unique_account_id(failed_account_id, failed_email))
+        fallback = await session.get(Account, generate_unique_account_id(fallback_account_id, fallback_email))
         assert failed is not None
         assert fallback is not None
         assert failed.status == AccountStatus.PAUSED
@@ -369,7 +374,7 @@ async def test_transcription_model_scoped_limit_applies(async_client):
 async def test_transcription_routing_ignores_model_registry_filter(async_client, monkeypatch):
     await _import_account(async_client, "acc_transcribe_registry", "registry-transcribe@example.com")
     registry = get_model_registry()
-    registry.update({"plus": [_make_upstream_model("gpt-5.1")]})
+    await registry.update({"plus": [_make_upstream_model("gpt-5.1")]})
 
     async def fake_transcribe(
         audio_bytes: bytes,

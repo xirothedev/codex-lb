@@ -27,18 +27,32 @@ from app.db.session import engine  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 
+def _drop_test_migration_tables(sync_conn) -> None:
+    sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+    sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
+
+
+def _recreate_test_schema(sync_conn) -> None:
+    _drop_test_migration_tables(sync_conn)
+    Base.metadata.drop_all(sync_conn)
+    Base.metadata.create_all(sync_conn)
+
+
+def _reset_test_database(sync_conn) -> None:
+    _recreate_test_schema(sync_conn)
+
+
 @pytest_asyncio.fixture
-async def app_instance():
-    app = create_app()
+async def _reset_db_state():
     async with engine.begin() as conn:
+        await conn.run_sync(_reset_test_database)
+    return True
 
-        def _reset(sync_conn):
-            sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-            sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
-            Base.metadata.drop_all(sync_conn)
-            Base.metadata.create_all(sync_conn)
 
-        await conn.run_sync(_reset)
+@pytest_asyncio.fixture
+async def app_instance(_reset_db_state):
+    del _reset_db_state
+    app = create_app()
     return app
 
 
@@ -49,16 +63,8 @@ async def dispose_engine():
 
 
 @pytest_asyncio.fixture
-async def db_setup():
-    async with engine.begin() as conn:
-
-        def _reset(sync_conn):
-            sync_conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
-            sync_conn.execute(text("DROP TABLE IF EXISTS schema_migrations"))
-            Base.metadata.drop_all(sync_conn)
-            Base.metadata.create_all(sync_conn)
-
-        await conn.run_sync(_reset)
+async def db_setup(_reset_db_state):
+    del _reset_db_state
     return True
 
 
@@ -100,3 +106,45 @@ def _reset_codex_version_cache():
     yield
     cache._cached_version = None
     cache._cached_at = 0.0
+
+
+def _reset_global_state() -> None:
+    """Reset global singletons that leak between tests."""
+    try:
+        from app.core.auth.api_key_cache import get_api_key_cache
+
+        get_api_key_cache().clear()
+    except Exception:
+        pass
+    try:
+        from app.core.middleware.firewall_cache import get_firewall_ip_cache as get_firewall_cache
+
+        get_firewall_cache().invalidate_all()
+    except Exception:
+        pass
+    try:
+        from app.modules.proxy.account_cache import get_account_selection_cache
+
+        get_account_selection_cache().invalidate()
+    except Exception:
+        pass
+    try:
+        from app.core.resilience.degradation import set_normal
+
+        set_normal()
+    except Exception:
+        pass
+    try:
+        from app.core.shutdown import set_bridge_drain_active
+
+        set_bridge_drain_active(False)
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_hot_path_caches():
+    """Reset T20 hot-path caches between tests to prevent state leakage."""
+    _reset_global_state()
+    yield
+    _reset_global_state()

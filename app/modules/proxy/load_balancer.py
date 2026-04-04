@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Collection
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
-from typing import Iterable
-
-import anyio
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Iterable
 
 from app.core import usage as usage_core
 from app.core.balancer import (
@@ -22,18 +21,26 @@ from app.core.balancer import (
 from app.core.balancer.types import UpstreamError
 from app.core.config.settings import get_settings
 from app.core.openai.model_registry import get_model_registry
+from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
+from app.core.resilience.degradation import get_status as get_degradation_status
+from app.core.resilience.degradation import set_degraded, set_normal
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.accounts.runtime_health import pause_account
-from app.modules.accounts.repository import AccountsRepository
+from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
-from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
 
+if TYPE_CHECKING:
+    from app.modules.accounts.repository import AccountsRepository
+    from app.modules.proxy.sticky_repository import StickySessionsRepository
+
 logger = logging.getLogger(__name__)
+
+_MAX_SELECTION_ATTEMPTS = 4
 
 _STICKY_GRACE_PERIOD_SECONDS = 10.0
 _RECOVERABLE_STATUSES = frozenset(
@@ -57,6 +64,7 @@ class RuntimeState:
     last_selected_at: float | None = None
     error_count: int = 0
     version: int = 0
+    blocked_at: float | None = None
 
 
 @dataclass
@@ -75,11 +83,17 @@ class _SelectionInputs:
     error_code: str | None = None
 
 
+SelectionInputs = _SelectionInputs
+
+
 class LoadBalancer:
     def __init__(self, repo_factory: ProxyRepoFactory) -> None:
         self._repo_factory = repo_factory
         self._runtime: dict[str, RuntimeState] = {}
-        self._runtime_lock = anyio.Lock()
+        self._runtime_lock = asyncio.Lock()
+        self._account_locks: dict[str, asyncio.Lock] = {}
+        self._account_locks_registry_lock = asyncio.Lock()
+        self._selection_inputs_cache = get_account_selection_cache()
 
     async def select_account(
         self,
@@ -89,10 +103,11 @@ class LoadBalancer:
         reallocate_sticky: bool = False,
         sticky_max_age_seconds: int | None = None,
         prefer_earlier_reset_accounts: bool = False,
-        routing_strategy: RoutingStrategy = "usage_weighted",
+        routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         additional_limit_name: str | None = None,
         exclude_account_ids: Collection[str] | None = None,
+        budget_threshold_pct: float = 95.0,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
 
@@ -112,6 +127,14 @@ class LoadBalancer:
             return selection_inputs
 
         selection_inputs = await load_selection_inputs()
+        circuit_breaker_open = _is_upstream_circuit_breaker_open()
+        if circuit_breaker_open:
+            set_degraded("upstream circuit breaker is open")
+        elif selection_inputs.accounts:
+            set_normal()
+        elif selection_inputs.error_code is not None:
+            set_normal()
+
         if selection_inputs.error_code is not None and not selection_inputs.accounts:
             return AccountSelection(
                 account=None,
@@ -120,24 +143,20 @@ class LoadBalancer:
             )
 
         selected_snapshot: Account | None = None
-        selected_runtime_version: int | None = None
         error_message: str | None = None
         selected_states: list[AccountState] = []
         selected_account_map: dict[str, Account] = {}
         if sticky_key is None:
+            attempt = 0
             while True:
-                async with self._runtime_lock:
-                    self._prune_runtime(selection_inputs.accounts)
-                    states, account_map = _build_states(
-                        accounts=selection_inputs.accounts,
-                        latest_primary=selection_inputs.latest_primary,
-                        latest_secondary=selection_inputs.latest_secondary,
-                        runtime=self._runtime,
-                    )
-                    runtime_versions = {
-                        account.id: self._runtime.get(account.id, RuntimeState()).version
-                        for account in selection_inputs.accounts
-                    }
+                attempt += 1
+                self._prune_runtime(selection_inputs.accounts)
+                states, account_map = _build_states(
+                    accounts=selection_inputs.accounts,
+                    latest_primary=selection_inputs.latest_primary,
+                    latest_secondary=selection_inputs.latest_secondary,
+                    runtime=self._runtime,
+                )
 
                 result = select_account(
                     states,
@@ -145,55 +164,48 @@ class LoadBalancer:
                     routing_strategy=routing_strategy,
                 )
 
-                reload_selection_inputs = False
-                async with self._runtime_lock:
-                    if any(
-                        self._runtime.get(account.id, RuntimeState()).version != runtime_versions[account.id]
-                        for account in selection_inputs.accounts
-                    ):
-                        reload_selection_inputs = True
-                    else:
-                        selected_account_map = account_map
-                        selected_states = []
-                        for state in states:
-                            account = account_map.get(state.account_id)
-                            if account is None:
-                                continue
-                            self._sync_runtime_state(
-                                account,
-                                state,
-                                selected=result.account is not None and state.account_id == result.account.account_id,
-                            )
-                            selected_states.append(state)
-                        if result.account is not None:
-                            selected = account_map.get(result.account.account_id)
-                            if selected is None:
-                                error_message = result.error_message
-                            else:
-                                selected_reset_at = selected.reset_at
-                                for state in selected_states:
-                                    if state.account_id == result.account.account_id:
-                                        state.status = result.account.status
-                                        state.deactivation_reason = result.account.deactivation_reason
-                                        selected_reset_at = int(state.reset_at) if state.reset_at else None
-                                        break
-                                selected_snapshot = _clone_account(selected)
-                                selected_snapshot.status = result.account.status
-                                selected_snapshot.deactivation_reason = result.account.deactivation_reason
-                                selected_snapshot.reset_at = selected_reset_at
-                                selected_runtime_version = self._runtime.get(selected.id, RuntimeState()).version
-                        else:
-                            error_message = result.error_message
+                selected_account_map = account_map
+                selected_states = []
+                for state in states:
+                    account = account_map.get(state.account_id)
+                    if account is None:
+                        continue
+                    await self._sync_runtime_state_for_account(
+                        account,
+                        state,
+                        selected=result.account is not None and state.account_id == result.account.account_id,
+                    )
+                    selected_states.append(state)
 
-                if reload_selection_inputs:
-                    selection_inputs = await load_selection_inputs()
-                    if selection_inputs.error_code is not None and not selection_inputs.accounts:
-                        return AccountSelection(
-                            account=None,
-                            error_message=selection_inputs.error_message,
-                            error_code=selection_inputs.error_code,
-                        )
-                    continue
+                if result.account is not None:
+                    selected = account_map.get(result.account.account_id)
+                    if selected is None:
+                        error_message = result.error_message
+                    else:
+                        selected_reset_at = selected.reset_at
+                        for state in states:
+                            if state.account_id == result.account.account_id:
+                                state.status = result.account.status
+                                state.deactivation_reason = result.account.deactivation_reason
+                                selected_reset_at = int(state.reset_at) if state.reset_at else None
+                                break
+                        selected_snapshot = _clone_account(selected)
+                        selected_snapshot.status = result.account.status
+                        selected_snapshot.deactivation_reason = result.account.deactivation_reason
+                        selected_snapshot.reset_at = selected_reset_at
+                else:
+                    error_message = result.error_message
+
+                pre_persist_runtime_state = {
+                    aid: (
+                        runtime.reset_at,
+                        runtime.cooldown_until,
+                        runtime.error_count,
+                        runtime.last_error_at,
+                    )
+                    for aid, runtime in self._runtime.items()
+                }
+                pre_persist_cache_generation = self._selection_inputs_cache.generation
 
                 async with self._repo_factory() as repos:
                     stale_account_ids = await self._persist_selection_state(
@@ -202,103 +214,11 @@ class LoadBalancer:
                         selected_states,
                     )
                 stale_account_ids = stale_account_ids or set()
-                if selected_snapshot is None:
-                    async with self._runtime_lock:
-                        runtime_changed = any(
-                            self._runtime.get(account.id, RuntimeState()).version != runtime_versions[account.id]
-                            for account in selection_inputs.accounts
-                        )
-                    if runtime_changed:
-                        selection_inputs = await load_selection_inputs()
-                        if selection_inputs.error_code is not None and not selection_inputs.accounts:
-                            return AccountSelection(
-                                account=None,
-                                error_message=selection_inputs.error_message,
-                                error_code=selection_inputs.error_code,
-                            )
-                        error_message = None
-                        selected_states = []
-                        selected_account_map = {}
-                        continue
-                if selected_snapshot is not None and selected_runtime_version is not None:
-                    async with self._runtime_lock:
-                        current_runtime = self._runtime.get(selected_snapshot.id)
-                        runtime_changed = current_runtime is None or current_runtime.version != selected_runtime_version
-                    if selected_snapshot.id in stale_account_ids or runtime_changed:
-                        selection_inputs = await load_selection_inputs()
-                        if selection_inputs.error_code is not None and not selection_inputs.accounts:
-                            return AccountSelection(
-                                account=None,
-                                error_message=selection_inputs.error_message,
-                                error_code=selection_inputs.error_code,
-                            )
-                        selected_snapshot = None
-                        selected_runtime_version = None
-                        error_message = None
-                        selected_states = []
-                        selected_account_map = {}
-                        continue
-                break
-        else:
-            while True:
-                async with self._runtime_lock:
-                    self._prune_runtime(selection_inputs.accounts)
-                    states, account_map = _build_states(
-                        accounts=selection_inputs.accounts,
-                        latest_primary=selection_inputs.latest_primary,
-                        latest_secondary=selection_inputs.latest_secondary,
-                        runtime=self._runtime,
-                    )
-                    async with self._repo_factory() as repos:
-                        result = await self._select_with_stickiness(
-                            states=states,
-                            account_map=account_map,
-                            sticky_key=sticky_key,
-                            sticky_kind=sticky_kind,
-                            reallocate_sticky=reallocate_sticky,
-                            sticky_max_age_seconds=sticky_max_age_seconds,
-                            prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
-                            routing_strategy=routing_strategy,
-                            sticky_repo=repos.sticky_sessions,
-                        )
-                        selected_account_map = account_map
-                        selected_states = []
-                        for state in states:
-                            account = account_map.get(state.account_id)
-                            if account is None:
-                                continue
-                            self._sync_runtime_state(
-                                account,
-                                state,
-                                selected=result.account is not None and state.account_id == result.account.account_id,
-                            )
-                            selected_states.append(state)
-                        if result.account is not None:
-                            selected = account_map.get(result.account.account_id)
-                            if selected is None:
-                                error_message = result.error_message
-                            else:
-                                selected_reset_at = selected.reset_at
-                                for state in selected_states:
-                                    if state.account_id == result.account.account_id:
-                                        state.status = result.account.status
-                                        state.deactivation_reason = result.account.deactivation_reason
-                                        selected_reset_at = int(state.reset_at) if state.reset_at else None
-                                        break
-                                selected_snapshot = _clone_account(selected)
-                                selected_snapshot.status = result.account.status
-                                selected_snapshot.deactivation_reason = result.account.deactivation_reason
-                                selected_snapshot.reset_at = selected_reset_at
-                        else:
-                            error_message = result.error_message
-
-                        stale_account_ids = await self._persist_selection_state(
-                            repos.accounts,
-                            selected_account_map,
-                            selected_states,
-                        )
-                stale_account_ids = stale_account_ids or set()
                 if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
+                    if attempt >= _MAX_SELECTION_ATTEMPTS:
+                        selected_snapshot = None
+                        error_message = None
+                        break
                     selection_inputs = await load_selection_inputs()
                     if selection_inputs.error_code is not None and not selection_inputs.accounts:
                         return AccountSelection(
@@ -310,6 +230,127 @@ class LoadBalancer:
                     error_message = None
                     selected_states = []
                     selected_account_map = {}
+                    continue
+
+                if (
+                    selected_snapshot is not None
+                    and self._selection_inputs_cache.generation != pre_persist_cache_generation
+                    and attempt < _MAX_SELECTION_ATTEMPTS
+                ):
+                    selection_inputs = await load_selection_inputs()
+                    if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                        return AccountSelection(
+                            account=None,
+                            error_message=selection_inputs.error_message,
+                            error_code=selection_inputs.error_code,
+                        )
+                    selected_snapshot = None
+                    error_message = None
+                    selected_states = []
+                    selected_account_map = {}
+                    await asyncio.sleep(0)
+                    continue
+
+                if selected_snapshot is None and error_message == "No available accounts":
+                    runtime_recovered = any(
+                        self._runtime.get(account_id, RuntimeState()).reset_at != before[0]
+                        or self._runtime.get(account_id, RuntimeState()).cooldown_until != before[1]
+                        or self._runtime.get(account_id, RuntimeState()).error_count != before[2]
+                        or self._runtime.get(account_id, RuntimeState()).last_error_at != before[3]
+                        for account_id, before in pre_persist_runtime_state.items()
+                    )
+                    if runtime_recovered and attempt < _MAX_SELECTION_ATTEMPTS:
+                        selection_inputs = await load_selection_inputs()
+                        if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                            return AccountSelection(
+                                account=None,
+                                error_message=selection_inputs.error_message,
+                                error_code=selection_inputs.error_code,
+                            )
+                        error_message = None
+                        selected_states = []
+                        selected_account_map = {}
+                        await asyncio.sleep(0)
+                        continue
+
+                break
+
+        else:
+            attempt = 0
+            while True:
+                attempt += 1
+                self._prune_runtime(selection_inputs.accounts)
+                states, account_map = _build_states(
+                    accounts=selection_inputs.accounts,
+                    latest_primary=selection_inputs.latest_primary,
+                    latest_secondary=selection_inputs.latest_secondary,
+                    runtime=self._runtime,
+                )
+                async with self._repo_factory() as repos:
+                    result = await self._select_with_stickiness(
+                        states=states,
+                        account_map=account_map,
+                        sticky_key=sticky_key,
+                        sticky_kind=sticky_kind,
+                        reallocate_sticky=reallocate_sticky,
+                        sticky_max_age_seconds=sticky_max_age_seconds,
+                        budget_threshold_pct=budget_threshold_pct,
+                        prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                        routing_strategy=routing_strategy,
+                        sticky_repo=repos.sticky_sessions,
+                    )
+                    selected_account_map = account_map
+                    selected_states = []
+                    for state in states:
+                        account = account_map.get(state.account_id)
+                        if account is None:
+                            continue
+                        await self._sync_runtime_state_for_account(
+                            account,
+                            state,
+                            selected=result.account is not None and state.account_id == result.account.account_id,
+                        )
+                        selected_states.append(state)
+                    if result.account is not None:
+                        selected = account_map.get(result.account.account_id)
+                        if selected is None:
+                            error_message = result.error_message
+                        else:
+                            selected_reset_at = selected.reset_at
+                            for state in selected_states:
+                                if state.account_id == result.account.account_id:
+                                    state.status = result.account.status
+                                    state.deactivation_reason = result.account.deactivation_reason
+                                    selected_reset_at = int(state.reset_at) if state.reset_at else None
+                                    break
+                            selected_snapshot = _clone_account(selected)
+                            selected_snapshot.status = result.account.status
+                            selected_snapshot.deactivation_reason = result.account.deactivation_reason
+                            selected_snapshot.reset_at = selected_reset_at
+                    else:
+                        error_message = result.error_message
+
+                    stale_account_ids = await self._persist_selection_state(
+                        repos.accounts,
+                        selected_account_map,
+                        selected_states,
+                    )
+                stale_account_ids = stale_account_ids or set()
+                if selected_snapshot is not None and selected_snapshot.id in stale_account_ids:
+                    selected_snapshot = None
+                    error_message = None
+                    selected_states = []
+                    selected_account_map = {}
+                    if attempt >= _MAX_SELECTION_ATTEMPTS:
+                        break
+                    selection_inputs = await load_selection_inputs()
+                    if selection_inputs.error_code is not None and not selection_inputs.accounts:
+                        return AccountSelection(
+                            account=None,
+                            error_message=selection_inputs.error_message,
+                            error_code=selection_inputs.error_code,
+                        )
+                    await asyncio.sleep(0)
                     continue
                 break
 
@@ -323,6 +364,9 @@ class LoadBalancer:
             )
 
         if selected_snapshot is None:
+            if error_message == "No available accounts":
+                set_degraded("all upstream accounts are unavailable")
+                error_message = _format_degraded_error_message(error_message)
             return AccountSelection(account=None, error_message=error_message, error_code=None)
         logger.info(
             "Selected account_id=%s strategy=%s sticky=%s model=%s",
@@ -339,6 +383,13 @@ class LoadBalancer:
         model: str | None,
         additional_limit_name: str | None = None,
     ) -> _SelectionInputs:
+        cache_key = (model, additional_limit_name)
+        cached = await self._selection_inputs_cache.get(cache_key)
+        if cached is not None:
+            return _clone_selection_inputs(cached)
+
+        load_generation = self._selection_inputs_cache.generation
+
         async with self._repo_factory() as repos:
             all_accounts = await repos.accounts.list_accounts()
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
@@ -347,18 +398,26 @@ class LoadBalancer:
                 accounts = _filter_accounts_for_model(accounts, model)
             if model and not accounts:
                 if not all_accounts:
-                    return _SelectionInputs(
+                    selection_inputs = _SelectionInputs(
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
                     )
-                return _SelectionInputs(
+                    await self._selection_inputs_cache.set(
+                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+                    )
+                    return selection_inputs
+                selection_inputs = _SelectionInputs(
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
                     error_message=f"No accounts with a plan supporting model '{model}'",
                     error_code=NO_PLAN_SUPPORT_FOR_MODEL,
                 )
+                await self._selection_inputs_cache.set(
+                    _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+                )
+                return selection_inputs
 
             if effective_limit_name:
                 accounts, error_code, error_message = await self._filter_accounts_for_additional_limit(
@@ -368,23 +427,33 @@ class LoadBalancer:
                     repos=repos,
                 )
                 if not accounts:
-                    return _SelectionInputs(
+                    selection_inputs = _SelectionInputs(
                         accounts=[],
                         latest_primary={},
                         latest_secondary={},
                         error_message=error_message,
                         error_code=error_code,
                     )
+                    await self._selection_inputs_cache.set(
+                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+                    )
+                    return selection_inputs
             if not accounts:
-                return _SelectionInputs(
+                selection_inputs = _SelectionInputs(
                     accounts=[],
                     latest_primary={},
                     latest_secondary={},
                 )
+                await self._selection_inputs_cache.set(
+                    _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+                )
+                return selection_inputs
 
-            latest_primary = await repos.usage.latest_by_account()
-            latest_secondary = await repos.usage.latest_by_account(window="secondary")
-            return _SelectionInputs(
+            latest_primary, latest_secondary = await asyncio.gather(
+                repos.usage.latest_by_account(),
+                repos.usage.latest_by_account(window="secondary"),
+            )
+            selection_inputs = _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
                 latest_primary={
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_primary.items()
@@ -393,6 +462,10 @@ class LoadBalancer:
                     account_id: _clone_usage_history(entry) for account_id, entry in latest_secondary.items()
                 },
             )
+            await self._selection_inputs_cache.set(
+                _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+            )
+            return selection_inputs
 
     async def _filter_accounts_for_additional_limit(
         self,
@@ -492,6 +565,34 @@ class LoadBalancer:
         for account_id in stale_ids:
             self._runtime.pop(account_id, None)
 
+    async def _get_account_lock(self, account_id: str) -> asyncio.Lock:
+        lock = self._account_locks.get(account_id)
+        if lock is not None:
+            return lock
+        async with self._account_locks_registry_lock:
+            lock = self._account_locks.get(account_id)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._account_locks[account_id] = lock
+            return lock
+
+    async def _sync_runtime_state_for_account(
+        self,
+        account: Account,
+        state: AccountState,
+        *,
+        selected: bool = False,
+        expected_version: int | None = None,
+    ) -> bool:
+        lock = await self._get_account_lock(account.id)
+        async with lock:
+            return self._sync_runtime_state(
+                account,
+                state,
+                selected=selected,
+                expected_version=expected_version,
+            )
+
     async def _select_with_stickiness(
         self,
         *,
@@ -501,6 +602,7 @@ class LoadBalancer:
         sticky_kind: StickySessionKind | None,
         reallocate_sticky: bool,
         sticky_max_age_seconds: int | None,
+        budget_threshold_pct: float = 95.0,
         prefer_earlier_reset_accounts: bool,
         routing_strategy: RoutingStrategy,
         sticky_repo: StickySessionsRepository | None,
@@ -531,16 +633,68 @@ class LoadBalancer:
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
             if pinned is not None:
-                pinned_result = select_account(
-                    [pinned],
-                    prefer_earlier_reset=prefer_earlier_reset_accounts,
-                    routing_strategy=routing_strategy,
-                    allow_backoff_fallback=False,
+                # Check if pinned account has insufficient budget (< 5% remaining)
+                # or rate limit is far away (reset_at more than 10 minutes away)
+                now = time.time()
+                budget_exhausted = (
+                    sticky_kind == StickySessionKind.PROMPT_CACHE
+                    and pinned.status != AccountStatus.RATE_LIMITED
+                    and pinned.used_percent is not None
+                    and pinned.used_percent > budget_threshold_pct
                 )
-                if pinned_result.account is not None:
-                    if not reallocate_sticky and sticky_max_age_seconds is not None:
-                        await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
-                    return pinned_result
+                rate_limit_far_away = (
+                    sticky_kind == StickySessionKind.PROMPT_CACHE
+                    and pinned.status == AccountStatus.RATE_LIMITED
+                    and pinned.reset_at is not None
+                    and pinned.reset_at - now >= 600  # 10 minutes
+                )
+                if not (budget_exhausted or rate_limit_far_away):
+                    pinned_result = select_account(
+                        [pinned],
+                        prefer_earlier_reset=prefer_earlier_reset_accounts,
+                        routing_strategy=routing_strategy,
+                        allow_backoff_fallback=False,
+                    )
+                    if pinned_result.account is not None:
+                        if sticky_max_age_seconds is not None:
+                            await sticky_repo.upsert(sticky_key, pinned.account_id, kind=sticky_kind)
+                        return pinned_result
+                else:
+                    # Before reallocating, check whether the pool has a
+                    # meaningfully better candidate.  When every account
+                    # is above the budget threshold, reallocating just
+                    # wastes DB writes and destroys prompt-cache locality
+                    # (thrashing).
+                    if budget_exhausted:
+                        pool_best = select_account(
+                            states,
+                            prefer_earlier_reset=prefer_earlier_reset_accounts,
+                            routing_strategy=routing_strategy,
+                            deterministic_probe=True,
+                        )
+                        pool_also_exhausted = pool_best.account is not None and (
+                            pool_best.account.account_id == pinned.account_id
+                            or (
+                                pool_best.account.used_percent is not None
+                                and pool_best.account.used_percent > budget_threshold_pct
+                            )
+                        )
+                        if pool_also_exhausted:
+                            pinned_result = select_account(
+                                [pinned],
+                                prefer_earlier_reset=prefer_earlier_reset_accounts,
+                                routing_strategy=routing_strategy,
+                                allow_backoff_fallback=False,
+                            )
+                            if pinned_result.account is not None:
+                                if sticky_max_age_seconds is not None:
+                                    await sticky_repo.upsert(
+                                        sticky_key,
+                                        pinned.account_id,
+                                        kind=sticky_kind,
+                                    )
+                                return pinned_result
+                    reallocate_sticky = True
                 # Grace period: if the pinned account is rate-limited with a
                 # known reset time within a short window, retry selection
                 # with a small time advance to preserve prompt cache.
@@ -588,28 +742,36 @@ class LoadBalancer:
         return chosen
 
     async def mark_rate_limit(self, account: Account, error: UpstreamError) -> None:
-        async with self._runtime_lock:
+        lock = await self._get_account_lock(account.id)
+        async with lock:
             state = self._state_for(account)
             handle_rate_limit(state, error)
             self._sync_runtime_state(account, state)
+            self._runtime[account.id].blocked_at = time.time()
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
+            self._selection_inputs_cache.invalidate()
 
     async def mark_quota_exceeded(self, account: Account, error: UpstreamError) -> None:
-        async with self._runtime_lock:
+        lock = await self._get_account_lock(account.id)
+        async with lock:
             state = self._state_for(account)
             handle_quota_exceeded(state, error)
             self._sync_runtime_state(account, state)
+            self._runtime[account.id].blocked_at = time.time()
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
+            self._selection_inputs_cache.invalidate()
 
     async def mark_permanent_failure(self, account: Account, error_code: str) -> None:
-        async with self._runtime_lock:
+        lock = await self._get_account_lock(account.id)
+        async with lock:
             state = self._state_for(account)
             handle_permanent_failure(state, error_code)
             self._sync_runtime_state(account, state)
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
+            self._selection_inputs_cache.invalidate()
 
     async def mark_paused(self, account: Account, reason: str) -> None:
         async with self._runtime_lock:
@@ -639,7 +801,8 @@ class LoadBalancer:
         """Record *count* transient errors in a single lock acquisition."""
         if count < 1:
             return
-        async with self._runtime_lock:
+        lock = await self._get_account_lock(account.id)
+        async with lock:
             account_snapshot = _clone_account(account)
             state = self._state_for(account)
             state.error_count += count
@@ -650,7 +813,8 @@ class LoadBalancer:
 
     async def record_success(self, account: Account) -> None:
         """Clear transient error state after a successful upstream request."""
-        async with self._runtime_lock:
+        lock = await self._get_account_lock(account.id)
+        async with lock:
             runtime = self._runtime.get(account.id)
             if runtime and runtime.error_count > 0:
                 runtime.error_count = 0
@@ -671,6 +835,8 @@ class LoadBalancer:
             last_selected_at=runtime.last_selected_at,
             error_count=runtime.error_count,
             deactivation_reason=account.deactivation_reason,
+            plan_type=account.plan_type,
+            capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
         )
 
     def _sync_runtime_state(
@@ -836,6 +1002,26 @@ def _state_from_account(
     db_reset_at = float(account.reset_at) if account.reset_at else None
     effective_runtime_reset = db_reset_at or runtime.reset_at
 
+    # Clear the runtime reset guard only when ALL conditions hold:
+    #   1. The quota/rate-limit cooldown has expired (debounce period over).
+    #   2. The block event was tracked in this process (blocked_at set).
+    #   3. The governing usage row was refreshed AFTER the block event.
+    # The freshness check must use the row that governs each status:
+    #   QUOTA_EXCEEDED → secondary window, RATE_LIMITED → primary window.
+    # On restart both blocked_at and cooldown_until are None, so the
+    # guard stays — accounts remain blocked until persisted reset_at expires.
+    if runtime.cooldown_until is not None and runtime.cooldown_until <= time.time() and runtime.blocked_at is not None:
+        if account.status == AccountStatus.QUOTA_EXCEEDED:
+            freshness_entry = effective_secondary_entry
+        elif account.status == AccountStatus.RATE_LIMITED:
+            freshness_entry = primary_entry
+        else:
+            freshness_entry = None
+        if freshness_entry and freshness_entry.recorded_at is not None:
+            recorded_epoch = freshness_entry.recorded_at.replace(tzinfo=timezone.utc).timestamp()
+            if recorded_epoch > runtime.blocked_at:
+                effective_runtime_reset = None
+
     status, used_percent, reset_at = apply_usage_quota(
         status=account.status,
         primary_used=primary_used,
@@ -858,6 +1044,8 @@ def _state_from_account(
         last_selected_at=runtime.last_selected_at,
         error_count=runtime.error_count,
         deactivation_reason=account.deactivation_reason,
+        plan_type=account.plan_type,
+        capacity_credits=usage_core.capacity_for_plan(account.plan_type, "secondary"),
     )
 
 
@@ -882,7 +1070,10 @@ def _mapped_model_has_registry_entry(model: str | None) -> bool:
     snapshot = get_snapshot()
     if snapshot is None:
         return False
-    return model.strip().lower() in snapshot.model_plans
+    model_plans = getattr(snapshot, "model_plans", None)
+    if not isinstance(model_plans, dict):
+        return False
+    return model.strip().lower() in model_plans
 
 
 def _usage_entry_to_window_row(entry: UsageHistory) -> UsageWindowRow:
@@ -903,6 +1094,20 @@ def _clone_account(account: Account) -> Account:
 def _clone_usage_history(entry: UsageHistory) -> UsageHistory:
     data = {column.name: getattr(entry, column.name) for column in UsageHistory.__table__.columns}
     return UsageHistory(**data)
+
+
+def _clone_selection_inputs(selection_inputs: SelectionInputs) -> SelectionInputs:
+    return _SelectionInputs(
+        accounts=[_clone_account(account) for account in selection_inputs.accounts],
+        latest_primary={
+            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_primary.items()
+        },
+        latest_secondary={
+            account_id: _clone_usage_history(entry) for account_id, entry in selection_inputs.latest_secondary.items()
+        },
+        error_message=selection_inputs.error_message,
+        error_code=selection_inputs.error_code,
+    )
 
 
 async def _latest_additional_by_key(
@@ -935,6 +1140,8 @@ async def _latest_additional_by_key(
 
 
 def _additional_usage_fresh_since(now: datetime | None = None) -> datetime:
+    from app.core.config.settings import get_settings  # noqa: PLC0415
+
     current_time = now or utcnow()
     interval_seconds = max(get_settings().usage_refresh_interval_seconds * 2, 180)
     return current_time - timedelta(seconds=interval_seconds)
@@ -973,3 +1180,17 @@ def _additional_usage_is_exhausted(entry: AdditionalUsageHistory) -> bool:
     if entry.reset_at is not None and int(entry.reset_at) <= int(time.time()):
         return False
     return float(entry.used_percent) >= 100.0
+
+
+def _is_upstream_circuit_breaker_open() -> bool:
+    settings = get_settings()
+    if not getattr(settings, "circuit_breaker_enabled", False):
+        return False
+    return are_all_account_circuit_breakers_open()
+
+
+def _format_degraded_error_message(message: str | None) -> str:
+    degradation_status = get_degradation_status()
+    reason = degradation_status.get("reason") or "upstream capacity is currently unavailable"
+    base_message = message or "Upstream unavailable"
+    return f"{base_message}. Service is operating in degraded mode: {reason}"

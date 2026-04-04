@@ -4,10 +4,12 @@ import json
 import secrets
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from typing import Protocol
 
+from app.core.auth.api_key_cache import get_api_key_cache
+from app.core.cache.invalidation import NAMESPACE_API_KEY, get_cache_invalidation_poller
 from app.core.usage.pricing import (
     UsageTokens,
     calculate_cost_from_usage,
@@ -17,12 +19,17 @@ from app.core.utils.time import to_utc_naive, utcnow
 from app.db.models import ApiKey, ApiKeyLimit, LimitType, LimitWindow
 from app.modules.api_keys.repository import (
     _UNSET,
+    ApiKeyTrendBucket,
     ApiKeyUsageSummary,
+    ApiKeyUsageTotals,
     ReservationResult,
     UsageReservationData,
     UsageReservationItemData,
     _Unset,
 )
+
+_SPARKLINE_DAYS = 7
+_DETAIL_BUCKET_SECONDS = 3600
 
 
 class ApiKeysRepositoryProtocol(Protocol):
@@ -34,6 +41,7 @@ class ApiKeysRepositoryProtocol(Protocol):
 
     async def list_all(self) -> list[ApiKey]: ...
     async def list_usage_summary_by_key(self, key_ids: list[str] | None = None) -> dict[str, ApiKeyUsageSummary]: ...
+    async def get_usage_summary_by_key_id(self, key_id: str) -> ApiKeyUsageSummary: ...
 
     async def update(
         self,
@@ -43,6 +51,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         allowed_models: str | None | _Unset = ...,
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
+        enforced_service_tier: str | None | _Unset = ...,
         expires_at: datetime | None | _Unset = ...,
         is_active: bool | _Unset = ...,
         key_hash: str | _Unset = ...,
@@ -129,6 +138,21 @@ class ApiKeysRepositoryProtocol(Protocol):
         cost_microdollars: int | None,
     ) -> None: ...
 
+    async def trends_by_key(
+        self,
+        key_id: str,
+        since: datetime,
+        until: datetime,
+        bucket_seconds: int = 3600,
+    ) -> list[ApiKeyTrendBucket]: ...
+
+    async def usage_7d(
+        self,
+        key_id: str,
+        since: datetime,
+        until: datetime,
+    ) -> ApiKeyUsageTotals: ...
+
 
 class ApiKeyNotFoundError(ValueError):
     pass
@@ -169,6 +193,7 @@ class ApiKeyCreateData:
     allowed_models: list[str] | None
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
+    enforced_service_tier: str | None = None
     expires_at: datetime | None = None
     limits: list[LimitRuleInput] = field(default_factory=list)
 
@@ -183,6 +208,8 @@ class ApiKeyUpdateData:
     enforced_model_set: bool = False
     enforced_reasoning_effort: str | None = None
     enforced_reasoning_effort_set: bool = False
+    enforced_service_tier: str | None = None
+    enforced_service_tier_set: bool = False
     expires_at: datetime | None = None
     expires_at_set: bool = False
     is_active: bool | None = None
@@ -200,6 +227,7 @@ class ApiKeyData:
     allowed_models: list[str] | None
     enforced_model: str | None
     enforced_reasoning_effort: str | None
+    enforced_service_tier: str | None
     expires_at: datetime | None
     is_active: bool
     created_at: datetime
@@ -239,6 +267,7 @@ class ApiKeysService:
         normalized_allowed_models = _normalize_allowed_models(payload.allowed_models)
         enforced_model = _normalize_model_slug(payload.enforced_model)
         enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
+        enforced_service_tier = _normalize_service_tier(payload.enforced_service_tier)
         _validate_model_enforcement(enforced_model=enforced_model, allowed_models=normalized_allowed_models)
         row = ApiKey(
             id=str(__import__("uuid").uuid4()),
@@ -248,6 +277,7 @@ class ApiKeysService:
             allowed_models=_serialize_allowed_models(normalized_allowed_models),
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
+            enforced_service_tier=enforced_service_tier,
             expires_at=expires_at,
             is_active=True,
             created_at=now,
@@ -290,6 +320,11 @@ class ApiKeysService:
         else:
             enforced_reasoning_effort = None
 
+        if payload.enforced_service_tier_set:
+            enforced_service_tier = _normalize_service_tier(payload.enforced_service_tier)
+        else:
+            enforced_service_tier = None
+
         if payload.allowed_models_set or payload.enforced_model_set:
             existing = await self._repository.get_by_id(key_id)
             if existing is None:
@@ -311,6 +346,7 @@ class ApiKeysService:
             allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
             enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
             enforced_reasoning_effort=(enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET),
+            enforced_service_tier=(enforced_service_tier if payload.enforced_service_tier_set else _UNSET),
             expires_at=expires_at if payload.expires_at_set else _UNSET,
             is_active=(payload.is_active if payload.is_active_set and payload.is_active is not None else _UNSET),
         )
@@ -340,17 +376,29 @@ class ApiKeysService:
             if row is None:
                 raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
+        await get_api_key_cache().invalidate(row.key_hash)
+        poller = get_cache_invalidation_poller()
+        if poller is not None:
+            await poller.bump(NAMESPACE_API_KEY)
         return _to_api_key_data(row)
 
     async def delete_key(self, key_id: str) -> None:
+        row = await self._repository.get_by_id(key_id)
+        if row is None:
+            raise ApiKeyNotFoundError(f"API key not found: {key_id}")
         deleted = await self._repository.delete(key_id)
         if not deleted:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+        await get_api_key_cache().invalidate(row.key_hash)
+        poller = get_cache_invalidation_poller()
+        if poller is not None:
+            await poller.bump(NAMESPACE_API_KEY)
 
     async def regenerate_key(self, key_id: str) -> ApiKeyCreatedData:
         row = await self._repository.get_by_id(key_id)
         if row is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+        old_key_hash = row.key_hash
         plain_key = _generate_plain_key()
         updated = await self._repository.update(
             key_id,
@@ -359,6 +407,10 @@ class ApiKeysService:
         )
         if updated is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+        await get_api_key_cache().invalidate(old_key_hash)
+        poller = get_cache_invalidation_poller()
+        if poller is not None:
+            await poller.bump(NAMESPACE_API_KEY)
         usage_summary_by_key = await self._repository.list_usage_summary_by_key([updated.id])
         return _to_created_data(
             _to_api_key_data(updated, usage_summary=_to_usage_summary_data(usage_summary_by_key.get(updated.id))),
@@ -634,6 +686,111 @@ class ApiKeysService:
             cost_microdollars=cost_microdollars,
         )
 
+    async def get_key_trends(self, key_id: str) -> ApiKeyTrendsData | None:
+        row = await self._repository.get_by_id(key_id)
+        if row is None:
+            return None
+        now = utcnow()
+        since = now - timedelta(days=_SPARKLINE_DAYS)
+        buckets = await self._repository.trends_by_key(
+            key_id,
+            since,
+            now,
+            _DETAIL_BUCKET_SECONDS,
+        )
+        return _build_api_key_trends(key_id, buckets, since, now, _DETAIL_BUCKET_SECONDS)
+
+    async def get_key_usage_summary_for_self(self, key_id: str) -> ApiKeySelfUsageData | None:
+        """Return usage summary + current limits for a single key (self-service lookup)."""
+        row = await self._repository.get_by_id(key_id)
+        if row is None:
+            return None
+
+        now = utcnow()
+        # Reset any expired limits before reading state
+        await _lazy_reset_expired_limits(self._repository, row.limits, now=now)
+        refreshed = await self._repository.get_by_id(key_id)
+        if refreshed is None:
+            return None
+
+        usage = await self._repository.get_usage_summary_by_key_id(key_id)
+        limits = [
+            ApiKeySelfLimitData(
+                limit_type=limit.limit_type.value,
+                limit_window=limit.limit_window.value,
+                max_value=limit.max_value,
+                current_value=limit.current_value,
+                remaining_value=max(0, limit.max_value - limit.current_value),
+                model_filter=limit.model_filter,
+                reset_at=limit.reset_at,
+            )
+            for limit in refreshed.limits
+        ]
+        return ApiKeySelfUsageData(
+            request_count=usage.request_count,
+            total_tokens=usage.total_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
+            total_cost_usd=usage.total_cost_usd,
+            limits=limits,
+        )
+
+    async def get_key_usage_7d(self, key_id: str) -> ApiKeyUsage7DayData | None:
+        row = await self._repository.get_by_id(key_id)
+        if row is None:
+            return None
+        now = utcnow()
+        since = now - timedelta(days=7)
+        data = await self._repository.usage_7d(key_id, since, now)
+        return ApiKeyUsage7DayData(
+            key_id=key_id,
+            total_tokens=data.total_tokens,
+            total_cost_usd=data.total_cost_usd,
+            total_requests=data.total_requests,
+            cached_input_tokens=data.cached_input_tokens,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyTrendsPoint:
+    t: datetime
+    v: float
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyTrendsData:
+    key_id: str
+    cost: list[ApiKeyTrendsPoint] = field(default_factory=list)
+    tokens: list[ApiKeyTrendsPoint] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyUsage7DayData:
+    key_id: str
+    total_tokens: int = 0
+    total_cost_usd: float = 0.0
+    total_requests: int = 0
+    cached_input_tokens: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeySelfLimitData:
+    limit_type: str
+    limit_window: str
+    max_value: int
+    current_value: int
+    remaining_value: int
+    model_filter: str | None
+    reset_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeySelfUsageData:
+    request_count: int = 0
+    total_tokens: int = 0
+    cached_input_tokens: int = 0
+    total_cost_usd: float = 0.0
+    limits: list[ApiKeySelfLimitData] = field(default_factory=list)
+
 
 def _normalize_name(name: str) -> str:
     normalized = name.strip()
@@ -682,6 +839,7 @@ def _normalize_model_slug(value: str | None) -> str | None:
 
 
 _SUPPORTED_REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
+_SUPPORTED_SERVICE_TIERS = frozenset({"auto", "default", "priority", "flex"})
 
 
 def _normalize_expires_at(value: datetime | None) -> datetime | None:
@@ -709,6 +867,33 @@ def _normalize_reasoning_effort_lenient(value: str | None) -> str | None:
     if not normalized:
         return None
     if normalized in _SUPPORTED_REASONING_EFFORTS:
+        return normalized
+    return None
+
+
+def _normalize_service_tier(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if normalized == "fast":
+        normalized = "priority"
+    if normalized not in _SUPPORTED_SERVICE_TIERS:
+        options = ", ".join(sorted(_SUPPORTED_SERVICE_TIERS | {"fast"}))
+        raise ValueError(f"Unsupported enforced service tier '{normalized}'. Expected one of: {options}")
+    return normalized
+
+
+def _normalize_service_tier_lenient(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if not normalized:
+        return None
+    if normalized == "fast":
+        return "priority"
+    if normalized in _SUPPORTED_SERVICE_TIERS:
         return normalized
     return None
 
@@ -848,6 +1033,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         allowed_models=data.allowed_models,
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
+        enforced_service_tier=data.enforced_service_tier,
         expires_at=data.expires_at,
         is_active=data.is_active,
         created_at=data.created_at,
@@ -867,6 +1053,7 @@ def _to_api_key_data(row: ApiKey, *, usage_summary: ApiKeyUsageSummaryData | Non
         allowed_models=_deserialize_allowed_models(row.allowed_models),
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),
+        enforced_service_tier=_normalize_service_tier_lenient(row.enforced_service_tier),
         expires_at=row.expires_at,
         is_active=row.is_active,
         created_at=row.created_at,
@@ -1017,3 +1204,37 @@ def _calculate_cost_microdollars(
     if cost_usd is None:
         return 0
     return int(cost_usd * 1_000_000)
+
+
+def _build_api_key_trends(
+    key_id: str,
+    buckets: list[ApiKeyTrendBucket],
+    since: datetime,
+    until: datetime,
+    bucket_seconds: int,
+) -> ApiKeyTrendsData:
+    since_utc = since.replace(tzinfo=timezone.utc) if since.tzinfo is None else since.astimezone(timezone.utc)
+    until_utc = until.replace(tzinfo=timezone.utc) if until.tzinfo is None else until.astimezone(timezone.utc)
+    if until_utc <= since_utc:
+        return ApiKeyTrendsData(key_id=key_id)
+
+    start_epoch = (int(since_utc.timestamp()) // bucket_seconds) * bucket_seconds
+    # The SQL window is exclusive of `until`, so step back one microsecond to find the last visible bucket.
+    end_epoch = (int((until_utc - timedelta(microseconds=1)).timestamp()) // bucket_seconds) * bucket_seconds
+    bucket_count = ((end_epoch - start_epoch) // bucket_seconds) + 1
+    time_grid = [start_epoch + i * bucket_seconds for i in range(bucket_count)]
+
+    cost_by_bucket: dict[int, float] = {}
+    tokens_by_bucket: dict[int, int] = {}
+    for b in buckets:
+        cost_by_bucket[b.bucket_epoch] = b.total_cost_usd
+        tokens_by_bucket[b.bucket_epoch] = b.total_tokens
+
+    cost_points: list[ApiKeyTrendsPoint] = []
+    tokens_points: list[ApiKeyTrendsPoint] = []
+    for epoch in time_grid:
+        dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+        cost_points.append(ApiKeyTrendsPoint(t=dt, v=round(cost_by_bucket.get(epoch, 0.0), 6)))
+        tokens_points.append(ApiKeyTrendsPoint(t=dt, v=float(tokens_by_bucket.get(epoch, 0))))
+
+    return ApiKeyTrendsData(key_id=key_id, cost=cost_points, tokens=tokens_points)

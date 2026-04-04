@@ -25,7 +25,7 @@ import {
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { ModelMultiSelect } from "@/features/api-keys/components/model-multi-select";
-import type { ApiKey, ApiKeyUpdateRequest, LimitRuleCreate, LimitType } from "@/features/api-keys/schemas";
+import type { ApiKey, ApiKeyUpdateRequest, LimitRuleCreate, LimitType, ServiceTierType } from "@/features/api-keys/schemas";
 import { parseDate } from "@/utils/formatters";
 
 import { hasLimitRuleChanges, normalizeLimitRules } from "./limit-rules-utils";
@@ -78,6 +78,9 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
   const [enforcedReasoningEffort, setEnforcedReasoningEffort] = useState<string>(
     apiKey.enforcedReasoningEffort || "none",
   );
+  const [enforcedServiceTier, setEnforcedServiceTier] = useState<string>(
+    apiKey.enforcedServiceTier || "none",
+  );
 
   const handleSubmit = async (values: FormValues) => {
     const normalizedLimits = normalizeLimitRules(limitRules);
@@ -86,13 +89,18 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       allowedModels: selectedModels.length > 0 ? selectedModels : null,
       enforcedModel: enforcedModel.trim() ? enforcedModel.trim() : null,
       enforcedReasoningEffort: enforcedReasoningEffort === "none" ? null : enforcedReasoningEffort as "minimal" | "low" | "medium" | "high" | "xhigh",
+      enforcedServiceTier: enforcedServiceTier === "none" ? null : enforcedServiceTier as ServiceTierType,
       expiresAt: expiresAt?.toISOString() ?? null,
       isActive: values.isActive,
     };
     if (hasLimitRuleChanges(initialLimitRules, limitRules)) {
       payload.limits = normalizedLimits;
     }
-    await onSubmit(payload);
+    try {
+      await onSubmit(payload);
+    } catch {
+      return;
+    }
     onClose();
   };
 
@@ -119,12 +127,12 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             />
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Allowed models</label>
+              <div className="text-sm font-medium">Allowed models</div>
               <ModelMultiSelect value={selectedModels} onChange={setSelectedModels} />
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Enforced model</label>
+              <div className="text-sm font-medium">Enforced model</div>
               <Input
                 value={enforcedModel}
                 onChange={(e) => setEnforcedModel(e.target.value)}
@@ -134,7 +142,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Enforced reasoning</label>
+              <div className="text-sm font-medium">Enforced reasoning</div>
               <Select value={enforcedReasoningEffort} onValueChange={setEnforcedReasoningEffort}>
                 <SelectTrigger>
                   <SelectValue placeholder="None" />
@@ -151,7 +159,23 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-medium">Expiry</label>
+              <div className="text-sm font-medium">Enforced service tier</div>
+              <Select value={enforcedServiceTier} onValueChange={setEnforcedServiceTier}>
+                <SelectTrigger>
+                  <SelectValue placeholder="None" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem value="auto">Auto</SelectItem>
+                  <SelectItem value="default">Default</SelectItem>
+                  <SelectItem value="priority">Priority</SelectItem>
+                  <SelectItem value="flex">Flex</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">Expiry</div>
               <ExpiryPicker value={expiresAt} onChange={setExpiresAt} />
             </div>
 
@@ -174,7 +198,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             {apiKey.limits.length > 0 ? (
               <div className="space-y-1">
-                <label className="text-xs font-medium text-muted-foreground">Current usage</label>
+                <div className="text-xs font-medium text-muted-foreground">Current usage</div>
                 <div className="space-y-1">
                   {apiKey.limits.map((limit) => (
                     <LimitUsageBar key={limit.id} limit={limit} />

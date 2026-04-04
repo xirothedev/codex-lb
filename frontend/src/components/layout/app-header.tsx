@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils";
 const DEFAULT_NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard" },
   { to: "/accounts", label: "Accounts" },
+  { to: "/apis", label: "APIs" },
   { to: "/settings", label: "Settings" },
 ] as const;
 

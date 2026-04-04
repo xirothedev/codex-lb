@@ -60,6 +60,12 @@ class _JsonResponse:
     async def json(self, *, content_type=None):
         return self._payload
 
+    def __await__(self):
+        async def _return_self():
+            return self
+
+        return _return_self().__await__()
+
 
 class _JsonSession:
     def __init__(self, response: _JsonResponse) -> None:
@@ -340,11 +346,16 @@ async def test_proxy_compact_401_pauses_failed_account_and_fails_over(async_clie
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
     assert response.status_code == 200
     assert response.json()["output"] == []
-    assert captured_account_ids == [first_account_id, second_account_id]
+    assert len(captured_account_ids) == 2
+    assert set(captured_account_ids) == {first_account_id, second_account_id}
+    failed_id = captured_account_ids[0]
+    fallback_id = captured_account_ids[1]
+    failed_email = first_email if failed_id == first_account_id else second_email
+    fallback_email = second_email if failed_id == first_account_id else first_email
 
     async with SessionLocal() as session:
-        failed = await session.get(Account, generate_unique_account_id(first_account_id, first_email))
-        fallback = await session.get(Account, generate_unique_account_id(second_account_id, second_email))
+        failed = await session.get(Account, generate_unique_account_id(failed_id, failed_email))
+        fallback = await session.get(Account, generate_unique_account_id(fallback_id, fallback_email))
         assert failed is not None
         assert fallback is not None
         assert failed.status == AccountStatus.PAUSED

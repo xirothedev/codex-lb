@@ -147,6 +147,23 @@ async def validate_dashboard_session(request: Request) -> None:
         raise DashboardAuthError("TOTP verification is required for dashboard access", code="totp_required")
 
 
+async def validate_viewer_session(request: Request) -> ViewerSessionState:
+    session_id = request.cookies.get(VIEWER_SESSION_COOKIE)
+    state = get_viewer_session_store().get(session_id)
+    if state is None:
+        raise DashboardAuthError("Authentication is required")
+
+    async with get_background_session() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        try:
+            api_key = await service.get_key_by_id(state.api_key_id)
+        except ApiKeyInvalidError as exc:
+            raise DashboardAuthError("Authentication is required") from exc
+    if api_key.key_prefix != state.key_prefix:
+        raise DashboardAuthError("Authentication is required")
+    return state
+
+
 def get_dashboard_request_auth_mode() -> DashboardAuthMode:
     from app.core.config.settings import get_settings
 

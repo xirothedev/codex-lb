@@ -33,6 +33,7 @@ from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
+from app.modules.accounts.runtime_health import pause_account
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
@@ -808,6 +809,28 @@ class LoadBalancer:
             self._sync_runtime_state(account, state)
             async with self._repo_factory() as repos:
                 await self._persist_state(repos.accounts, account, state)
+            self._selection_inputs_cache.invalidate()
+
+    async def mark_paused(self, account: Account, reason: str) -> None:
+        async with self._runtime_lock:
+            state = self._state_for(account)
+            state.status = AccountStatus.PAUSED
+            state.deactivation_reason = reason
+            state.reset_at = None
+            state.cooldown_until = None
+            state.last_error_at = None
+            state.error_count = 0
+            self._sync_runtime_state(account, state)
+            async with self._repo_factory() as repos:
+                accounts_repo = getattr(repos, "accounts", None)
+                if accounts_repo is None:
+                    account.status = AccountStatus.PAUSED
+                    account.deactivation_reason = reason
+                    account.reset_at = None
+                    return
+                updated = await pause_account(accounts_repo, account, reason)
+                if not updated:
+                    await self._persist_state(accounts_repo, account, state)
             self._selection_inputs_cache.invalidate()
 
     async def record_error(self, account: Account) -> None:

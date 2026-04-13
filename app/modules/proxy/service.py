@@ -1080,25 +1080,6 @@ class ProxyService:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         routing_strategy = _routing_strategy(settings)
         try:
-            selection = await self._select_account_with_budget_compatible(
-                deadline,
-                request_id=request_id,
-                kind="transcribe",
-                api_key=api_key,
-                prefer_earlier_reset_accounts=prefer_earlier_reset,
-                routing_strategy=routing_strategy,
-                model=None,
-            )
-            account = selection.account
-            if not account:
-                log_error_code = selection.error_code or "no_accounts"
-                log_error_message = selection.error_message or "No active accounts available"
-                raise ProxyResponseError(
-                    503,
-                    openai_error(log_error_code, log_error_message),
-                )
-            account_id_value = account.id
-
             async def _call_transcribe(target: Account) -> dict[str, JsonValue]:
                 access_token = self._encryptor.decrypt(target.access_token_encrypted)
                 account_id = _header_account_id(target.chatgpt_account_id)
@@ -1142,6 +1123,15 @@ class ProxyService:
                 if not account:
                     log_error_code = selection.error_code or "no_accounts"
                     log_error_message = selection.error_message or "No active accounts available"
+                    if excluded_account_ids:
+                        raise ProxyResponseError(
+                            502,
+                            openai_error(
+                                "upstream_unavailable",
+                                "All account attempts exhausted",
+                                error_type="server_error",
+                            ),
+                        )
                     raise ProxyResponseError(
                         503,
                         openai_error(log_error_code, log_error_message),
@@ -1187,6 +1177,15 @@ class ProxyService:
                     await self._pause_account_for_upstream_401(account)
                     excluded_account_ids.add(account.id)
                     continue
+            if excluded_account_ids:
+                raise ProxyResponseError(
+                    502,
+                    openai_error(
+                        "upstream_unavailable",
+                        "All account attempts exhausted",
+                        error_type="server_error",
+                    ),
+                )
         except ProxyResponseError as exc:
             error = _parse_openai_error(exc.payload)
             log_error_code = log_error_code or _normalize_error_code(
@@ -1619,23 +1618,41 @@ class ProxyService:
         sticky_max_age_seconds: int | None = None,
     ) -> tuple[Account | None, UpstreamResponsesWebSocket | None]:
         deadline = _websocket_connect_deadline(request_state, get_settings().proxy_request_budget_seconds)
-        try:
-            selection = await self._select_account_with_budget_compatible(
-                deadline,
-                request_id=request_state.request_log_id or request_state.request_id,
-                kind="websocket",
-                api_key=api_key,
-                sticky_key=sticky_key,
-                sticky_kind=sticky_kind,
-                reallocate_sticky=reallocate_sticky,
-                sticky_max_age_seconds=sticky_max_age_seconds,
-                prefer_earlier_reset_accounts=prefer_earlier_reset,
-                routing_strategy=routing_strategy,
-                model=model,
-            )
-        except ProxyResponseError as exc:
-            if _is_proxy_budget_exhausted_error(exc):
-                await self._emit_websocket_proxy_request_timeout(
+        excluded_account_ids: set[str] = set()
+        account: Account | None = None
+
+        for _account_attempt in range(3):
+            try:
+                selection = await self._select_account_with_budget(
+                    deadline,
+                    request_id=request_state.request_log_id or request_state.request_id,
+                    kind="websocket",
+                    sticky_key=sticky_key,
+                    sticky_kind=sticky_kind,
+                    reallocate_sticky=reallocate_sticky,
+                    sticky_max_age_seconds=sticky_max_age_seconds,
+                    prefer_earlier_reset_accounts=prefer_earlier_reset,
+                    routing_strategy=routing_strategy,
+                    model=model,
+                    exclude_account_ids=excluded_account_ids,
+                )
+            except ProxyResponseError as exc:
+                if _is_proxy_budget_exhausted_error(exc):
+                    await self._emit_websocket_proxy_request_timeout(
+                        websocket,
+                        client_send_lock=client_send_lock,
+                        account_id=None,
+                        api_key=api_key,
+                        request_state=request_state,
+                    )
+                    return None, None
+                raise
+
+            account = selection.account
+            if not account:
+                error_code = selection.error_code or "no_accounts"
+                error_message = selection.error_message or "No active accounts available"
+                await self._emit_websocket_connect_failure(
                     websocket,
                     client_send_lock=client_send_lock,
                     account_id=None,

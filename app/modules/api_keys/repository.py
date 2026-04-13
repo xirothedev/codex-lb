@@ -118,7 +118,7 @@ class ApiKeysRepository:
         result = await self._session.execute(select(Account).where(Account.id.in_(account_ids)))
         return list(result.scalars().all())
 
-    async def list_usage_summary_by_key(self) -> dict[str, ApiKeyUsageSummary]:
+    async def list_usage_summary_by_key(self, key_ids: list[str] | None = None) -> dict[str, ApiKeyUsageSummary]:
         stmt = (
             select(
                 RequestLog.api_key_id,

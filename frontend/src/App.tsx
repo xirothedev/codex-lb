@@ -10,11 +10,7 @@ import { AccountsPage } from "@/features/accounts/components/accounts-page";
 import { ApisPage } from "@/features/apis/components/apis-page";
 import { DashboardPage } from "@/features/dashboard/components/dashboard-page";
 import { SettingsPage } from "@/features/settings/components/settings-page";
-import { ViewerAuthGate } from "@/features/viewer-auth/components/viewer-auth-gate";
-import { useViewerAuthStore } from "@/features/viewer-auth/hooks/use-viewer-auth";
-import { ViewerDashboardPage } from "@/features/viewer/components/viewer-dashboard-page";
-import { ViewerPage } from "@/features/viewer/components/viewer-page";
-import { ViewerSettingsPage } from "@/features/viewer/components/viewer-settings-page";
+import { useTimeFormatStore } from "@/hooks/use-time-format";
 
 const VIEWER_NAV_ITEMS = [
   { to: "/viewer/dashboard", label: "Dashboard" },
@@ -25,9 +21,10 @@ const VIEWER_NAV_ITEMS = [
 function AdminAppLayout() {
   const logout = useAuthStore((state) => state.logout);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
+  const timeFormat = useTimeFormatStore((state) => state.timeFormat);
 
   return (
-    <div className="flex min-h-screen flex-col bg-background pb-10">
+    <div className="flex min-h-screen flex-col bg-background pb-10" data-time-format={timeFormat}>
       <AppHeader
         onLogout={() => {
           void logout();
@@ -65,36 +62,18 @@ export default function App() {
   return (
     <TooltipProvider>
       <Toaster richColors />
-      <Routes>
-        <Route
-          path="/viewer"
-          element={(
-            <ViewerAuthGate>
-              <ViewerAppLayout />
-            </ViewerAuthGate>
-          )}
-        >
-          <Route index element={<Navigate to="/viewer/dashboard" replace />} />
-          <Route path="dashboard" element={<ViewerDashboardPage />} />
-          <Route path="quota" element={<ViewerPage />} />
-          <Route path="settings" element={<ViewerSettingsPage />} />
-        </Route>
-
-        <Route
-          element={(
-            <AuthGate>
-              <AdminAppLayout />
-            </AuthGate>
-          )}
-        >
-          <Route path="/" element={<Navigate to="/dashboard" replace />} />
-          <Route path="/dashboard" element={<DashboardPage />} />
-          <Route path="/accounts" element={<AccountsPage />} />
-          <Route path="/apis" element={<ApisPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/firewall" element={<Navigate to="/settings" replace />} />
-        </Route>
-      </Routes>
+      <AuthGate>
+        <Routes>
+          <Route element={<AppLayout />}>
+            <Route path="/" element={<Navigate to="/dashboard" replace />} />
+            <Route path="/dashboard" element={<DashboardPage />} />
+            <Route path="/accounts" element={<AccountsPage />} />
+            <Route path="/apis" element={<ApisPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/firewall" element={<Navigate to="/settings" replace />} />
+          </Route>
+        </Routes>
+      </AuthGate>
     </TooltipProvider>
   );
 }

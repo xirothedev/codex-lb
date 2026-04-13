@@ -9,11 +9,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Protocol
 
+from app.core.auth.refresh import RefreshError
+from app.core.balancer import PERMANENT_FAILURE_CODES
 from app.core.clients.usage import UsageFetchError, fetch_usage
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
-from app.core.usage.models import UsagePayload
+from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload
 from app.core.utils.request_id import get_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, UsageHistory
@@ -267,11 +269,24 @@ class UsageUpdater:
                 account_id=usage_account_id,
             )
         except UsageFetchError as exc:
-            if _should_deactivate_for_usage_error(exc.status_code):
+            if _should_deactivate_for_usage_error(exc):
                 await self._deactivate_for_client_error(account, exc)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
-            if exc.status_code == 401 and self._accounts_repo is not None:
-                await pause_account(self._accounts_repo, account, PAUSE_REASON_USAGE_REFRESH)
+            if exc.status_code != 401 or not self._auth_manager:
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+            try:
+                account = await self._auth_manager.ensure_fresh(account, force=True)
+            except RefreshError:
+                return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
+            access_token = self._encryptor.decrypt(account.access_token_encrypted)
+            try:
+                payload = await fetch_usage(
+                    access_token=access_token,
+                    account_id=usage_account_id,
+                )
+            except UsageFetchError as retry_exc:
+                if _should_deactivate_for_usage_error(retry_exc):
+                    await self._deactivate_for_client_error(account, retry_exc)
                 return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
             return AccountRefreshResult(usage_written=False, fetch_succeeded=False)
 
@@ -491,7 +506,7 @@ def _prefer_merged_additional_window(
 
 
 def _merge_additional_rate_limits(
-    additional_rate_limits: Collection[object],
+    additional_rate_limits: Collection[AdditionalRateLimitPayload],
     *,
     account_id: str,
     now_epoch: int,
@@ -662,7 +677,16 @@ def _reset_at(reset_at: int | None, reset_after_seconds: int | None, now_epoch: 
 # for proxy traffic, so treat it as a refresh failure instead of a permanent
 # account-level deactivation signal.
 _DEACTIVATING_USAGE_STATUS_CODES = {402, 404}
+_DEACTIVATING_USAGE_MESSAGE_HINTS = (
+    "your openai account has been deactivated",
+    "account has been deactivated",
+)
 
 
-def _should_deactivate_for_usage_error(status_code: int) -> bool:
-    return status_code in _DEACTIVATING_USAGE_STATUS_CODES
+def _should_deactivate_for_usage_error(exc: UsageFetchError) -> bool:
+    if exc.status_code in _DEACTIVATING_USAGE_STATUS_CODES:
+        return True
+    if exc.code in PERMANENT_FAILURE_CODES:
+        return True
+    lowered = exc.message.lower()
+    return any(hint in lowered for hint in _DEACTIVATING_USAGE_MESSAGE_HINTS)

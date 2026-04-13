@@ -17,6 +17,7 @@ from starlette.requests import Request
 
 import app.core.clients.proxy as proxy_module
 from app.core.clients.proxy import _build_upstream_headers, filter_inbound_headers
+from app.core.config.settings import Settings
 from app.core.crypto import TokenEncryptor
 from app.core.errors import openai_error
 from app.core.openai.models import OpenAIResponsePayload
@@ -145,14 +146,14 @@ class _RingMembershipStub:
     def __init__(self, members: list[str]) -> None:
         self.members = members
 
-    async def list_active(self, stale_threshold_seconds: int = 120) -> list[str]:
-        del stale_threshold_seconds
+    async def list_active(self, stale_threshold_seconds: int = 120, *, require_endpoint: bool = False) -> list[str]:
+        del stale_threshold_seconds, require_endpoint
         return list(self.members)
 
 
 @pytest.mark.anyio
 async def test_owner_instance_uses_rendezvous_hash() -> None:
-    settings = SimpleNamespace(
+    settings = Settings(
         http_responses_session_bridge_instance_id="pod-a",
         http_responses_session_bridge_instance_ring=["pod-a", "pod-b", "pod-c", "pod-d", "pod-e"],
     )
@@ -184,9 +185,9 @@ async def test_owner_instance_uses_rendezvous_hash() -> None:
 
 @pytest.mark.anyio
 async def test_ring_raises_on_db_error() -> None:
-    settings = SimpleNamespace(
+    settings = Settings(
         http_responses_session_bridge_instance_id="pod-a",
-        http_responses_session_bridge_instance_ring=["pod-b", "pod-c"],
+        http_responses_session_bridge_instance_ring=["pod-a", "pod-b", "pod-c"],
     )
     ring_membership = AsyncMock()
     ring_membership.list_active.side_effect = RuntimeError("db unavailable")
@@ -312,6 +313,24 @@ def test_has_native_codex_transport_headers_does_not_treat_session_id_as_websock
 def test_has_native_codex_transport_headers_still_accepts_explicit_native_stream_headers_without_originator():
     assert proxy_module._has_native_codex_transport_headers({"x-codex-turn-metadata": "1"}) is True
     assert proxy_module._has_native_codex_transport_headers({"x-codex-beta-features": "repl"}) is True
+
+
+def test_infer_websocket_handshake_error_code_detects_account_deactivated_message():
+    code = proxy_module._infer_websocket_handshake_error_code(
+        401,
+        "Your OpenAI account has been deactivated, please check your email for more information.",
+    )
+
+    assert code == "account_deactivated"
+
+
+def test_infer_websocket_handshake_error_code_keeps_generic_401_when_no_deactivation_hint():
+    code = proxy_module._infer_websocket_handshake_error_code(
+        401,
+        "Unauthorized",
+    )
+
+    assert code == "invalid_api_key"
 
 
 def test_parse_sse_event_reads_json_payload():
@@ -511,6 +530,7 @@ def _make_proxy_settings(*, log_proxy_service_tier_trace: bool) -> object:
         compact_request_budget_seconds=75.0,
         transcription_request_budget_seconds=120.0,
         upstream_compact_timeout_seconds=None,
+        http_responses_session_bridge_gateway_safe_mode=False,
         log_proxy_request_payload=False,
         log_proxy_request_shape=False,
         log_proxy_request_shape_raw_cache_key=False,
@@ -3986,6 +4006,129 @@ async def test_prepare_websocket_response_create_request_logs_affinity_metadata(
     assert "prompt_cache_key_set=True" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_prepare_websocket_response_create_request_releases_reservation_on_payload_too_large(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    reservation = SimpleNamespace(reservation_id="res_large_ws", model="gpt-5.1")
+    reserve_usage = AsyncMock(return_value=reservation)
+    release_usage = AsyncMock()
+    api_key = ApiKeyData(
+        id="key_ws_large",
+        name="large",
+        key_prefix="sk-large",
+        allowed_models=["gpt-5.1"],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
+
+    class Settings:
+        log_proxy_request_payload = False
+        log_proxy_request_shape = False
+        log_proxy_request_shape_raw_cache_key = False
+        log_proxy_service_tier_trace = False
+        openai_prompt_cache_key_derivation_enabled = True
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", 64)
+    monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES", 128)
+    monkeypatch.setattr(service, "_reserve_websocket_api_key_usage", reserve_usage)
+    monkeypatch.setattr(service, "_release_websocket_reservation", release_usage)
+    monkeypatch.setattr(service, "_refresh_websocket_api_key_policy", AsyncMock(return_value=api_key))
+
+    with pytest.raises(proxy_service.ProxyResponseError) as exc_info:
+        await service._prepare_websocket_response_create_request(
+            {
+                "type": "response.create",
+                "model": "gpt-5.1",
+                "input": [{"role": "user", "content": [{"type": "input_text", "text": "x" * 256}]}],
+            },
+            headers={},
+            codex_session_affinity=False,
+            openai_cache_affinity=True,
+            sticky_threads_enabled=False,
+            openai_cache_affinity_max_age_seconds=300,
+            api_key=api_key,
+        )
+
+    assert exc_info.value.status_code == 413
+    release_usage.assert_awaited_once_with(reservation)
+
+
+def test_slim_response_create_payload_rewrites_top_level_historical_input_image():
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {"type": "input_image", "image_url": "data:image/png;base64," + ("A" * 1500)},
+            {"role": "user", "content": [{"type": "input_text", "text": "ping"}]},
+        ],
+    }
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=256)
+    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
+
+    assert summary is not None
+    assert summary["historical_images_slimmed"] == 1
+    assert slimmed_input[0] == {
+        "role": "user",
+        "content": [{"type": "input_text", "text": proxy_service._RESPONSE_CREATE_IMAGE_OMISSION_NOTICE}],
+    }
+    assert slimmed_input[-1] == {"role": "user", "content": [{"type": "input_text", "text": "ping"}]}
+
+
+def test_slim_response_create_preserves_all_items_when_no_user_message():
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {"type": "function_call_output", "call_id": "call_1", "output": "A" * 2000},
+            {"type": "function_call_output", "call_id": "call_2", "output": "B" * 2000},
+        ],
+    }
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=256)
+
+    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
+    assert len(slimmed_input) == 2
+    first = slimmed_input[0]
+    second = slimmed_input[1]
+    assert isinstance(first, dict) and first["call_id"] == "call_1"
+    assert isinstance(second, dict) and second["call_id"] == "call_2"
+    assert summary is None
+
+
+def test_slim_response_create_handles_object_valued_content_image():
+    payload: dict[str, JsonValue] = {
+        "type": "response.create",
+        "model": "gpt-5.1",
+        "input": [
+            {
+                "role": "user",
+                "content": {"type": "input_image", "image_url": "data:image/png;base64," + ("A" * 1500)},
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "describe this"}]},
+        ],
+    }
+
+    slimmed_payload, summary = proxy_service._slim_response_create_payload_for_upstream(payload, max_bytes=4096)
+    slimmed_input = cast(list[JsonValue], slimmed_payload["input"])
+
+    assert isinstance(summary, dict)
+    assert summary["historical_images_slimmed"] == 1
+    assert len(slimmed_input) == 2
+    first_item = slimmed_input[0]
+    assert isinstance(first_item, dict)
+    first_content = first_item["content"]
+    assert isinstance(first_content, dict)
+    assert first_content["type"] == "input_text"
+
+
 def test_websocket_receive_timeout_prefers_idle_timeout_when_budget_allows(monkeypatch):
     monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
 
@@ -4757,7 +4900,7 @@ async def test_select_account_with_budget_times_out_during_settings_fetch(monkey
 
 
 @pytest.mark.asyncio
-async def test_transcribe_401_pauses_account_and_returns_no_accounts_when_pool_exhausted(monkeypatch):
+async def test_transcribe_budget_exhaustion_blocks_401_retry(monkeypatch):
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
@@ -4807,9 +4950,8 @@ async def test_transcribe_401_pauses_account_and_returns_no_accounts_when_pool_e
         )
 
     exc = _assert_proxy_response_error(exc_info.value)
-    assert exc.status_code == 503
-    assert exc.payload["error"]["code"] == "no_accounts"
-    pause_account.assert_awaited_once_with(account)
+    assert exc.status_code == 502
+    assert _proxy_error_code(exc) == "upstream_unavailable"
     assert transcribe_calls == 1
     assert request_logs.calls[0]["error_code"] == "no_accounts"
     assert request_logs.calls[0]["transport"] == "http"

@@ -328,9 +328,6 @@ async def test_regenerated_key_old_token_rejected_immediately() -> None:
         async def update(self, _key_id: str, **_kwargs: object) -> SimpleNamespace:
             return new_row
 
-        async def list_usage_summary_by_key(self, key_ids: list[str] | None = None) -> dict:
-            return {}
-
     cache = get_api_key_cache()
     await cache.set(old_key_hash, api_key_data)
 
@@ -380,8 +377,17 @@ async def test_deactivated_key_rejected_immediately() -> None:
     )
 
     class _UpdateOnlyRepo:
+        async def get_by_id(self, _key_id: str) -> SimpleNamespace:
+            return deactivated_row
+
         async def update(self, _key_id: str, **_kwargs: object) -> SimpleNamespace:
             return deactivated_row
+
+        async def commit(self) -> None:
+            return None
+
+        async def rollback(self) -> None:
+            return None
 
     cache = get_api_key_cache()
     await cache.set(key_hash, api_key_data)

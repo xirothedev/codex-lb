@@ -22,13 +22,9 @@ import {
 	createOauthStatusResponse,
 	createRequestLogFilterOptions,
 	createRequestLogsResponse,
-	createViewerApiKey,
-	createViewerApiKeyRegenerateResponse,
-	createViewerSession,
 	type DashboardAuthSession,
 	type DashboardSettings,
 	type RequestLogEntry,
-	type ViewerSession,
 } from "@/test/mocks/factories";
 
 const MODEL_OPTION_DELIMITER = ":::";
@@ -59,6 +55,7 @@ const ApiKeyUpdatePayloadSchema = z
 		name: z.string().optional(),
 		allowedModels: z.array(z.string()).nullable().optional(),
 		isActive: z.boolean().optional(),
+		assignedAccountIds: z.array(z.string()).optional(),
 		resetUsage: z.boolean().optional(),
 		limits: z
 			.array(
@@ -108,7 +105,6 @@ type MockState = {
 	accounts: AccountSummary[];
 	requestLogs: RequestLogEntry[];
 	authSession: DashboardAuthSession;
-	viewerSession: ViewerSession;
 	settings: DashboardSettings;
 	apiKeys: ApiKey[];
 	firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
@@ -128,11 +124,6 @@ function createInitialState(): MockState {
 		accounts: createDefaultAccounts(),
 		requestLogs: createDefaultRequestLogs(),
 		authSession: createDashboardAuthSession(),
-		viewerSession: createViewerSession({
-			authenticated: false,
-			apiKey: null,
-			canRegenerate: false,
-		}),
 		settings: createDashboardSettings(),
 		apiKeys: createDefaultApiKeys(),
 		firewallEntries: [],
@@ -282,30 +273,6 @@ function findAccount(accountId: string): AccountSummary | undefined {
 
 function findApiKey(keyId: string): ApiKey | undefined {
 	return state.apiKeys.find((item) => item.id === keyId);
-}
-
-function currentViewerApiKey() {
-  const base = state.viewerSession.apiKey ?? createViewerApiKey();
-  const source = state.apiKeys[0];
-  if (!source) {
-    return base;
-  }
-  return createViewerApiKey({
-    ...base,
-    id: source.id,
-    name: source.name,
-    keyPrefix: source.keyPrefix,
-    allowedModels: source.allowedModels,
-    enforcedModel: source.enforcedModel,
-    enforcedReasoningEffort: source.enforcedReasoningEffort,
-    expiresAt: source.expiresAt,
-    isActive: source.isActive,
-    createdAt: source.createdAt,
-    lastUsedAt: source.lastUsedAt,
-    limits: source.limits,
-    usageSummary: source.usageSummary ?? null,
-    maskedKey: `${source.keyPrefix}...`,
-  });
 }
 
 export const handlers = [
@@ -511,13 +478,38 @@ export const handlers = [
 	http.get("/api/sticky-sessions", ({ request }) => {
 		const url = new URL(request.url);
 		const staleOnly = url.searchParams.get("staleOnly") === "true";
+		const accountQuery = (url.searchParams.get("accountQuery") ?? "").trim().toLowerCase();
+		const keyQuery = (url.searchParams.get("keyQuery") ?? "").trim().toLowerCase();
+		const sortBy = url.searchParams.get("sortBy") ?? "updated_at";
+		const sortDir = url.searchParams.get("sortDir") ?? "desc";
 		const offset = Number(url.searchParams.get("offset") ?? "0");
 		const limit = Number(url.searchParams.get("limit") ?? "10");
-		const filteredEntries = staleOnly
-			? state.stickySessions.filter(
-					(entry) => entry.kind === "prompt_cache" && entry.isStale,
-				)
-			: state.stickySessions;
+		const filteredEntries = state.stickySessions.filter((entry) => {
+			if (staleOnly && !(entry.kind === "prompt_cache" && entry.isStale)) {
+				return false;
+			}
+			if (accountQuery && !entry.displayName.toLowerCase().includes(accountQuery)) {
+				return false;
+			}
+			if (keyQuery && !entry.key.toLowerCase().includes(keyQuery)) {
+				return false;
+			}
+			return true;
+		}).sort((left, right) => {
+			const direction = sortDir === "asc" ? 1 : -1;
+			if (sortBy === "account") {
+				return left.displayName.localeCompare(right.displayName) * direction;
+			}
+			if (sortBy === "key") {
+				return left.key.localeCompare(right.key) * direction;
+			}
+			const leftTime = Date.parse(sortBy === "created_at" ? left.createdAt : left.updatedAt);
+			const rightTime = Date.parse(sortBy === "created_at" ? right.createdAt : right.updatedAt);
+			if (leftTime !== rightTime) {
+				return (leftTime - rightTime) * direction;
+			}
+			return left.key.localeCompare(right.key);
+		});
 		const entries = filteredEntries.slice(offset, offset + limit);
 		const stalePromptCacheCount = state.stickySessions.filter(
 			(entry) => entry.kind === "prompt_cache" && entry.isStale,
@@ -542,15 +534,65 @@ export const handlers = [
 						}),
 					)
 					.min(1)
-					.max(500),
+					.max(500)
+					.refine(
+						(sessions) =>
+							new Set(sessions.map((session) => `${session.kind}:${session.key}`)).size === sessions.length,
+						"Duplicate sticky session targets are not allowed",
+					),
 			}),
 		)) ?? { sessions: [] };
 		const targets = new Set(payload.sessions.map((session) => `${session.kind}:${session.key}`));
-		const before = state.stickySessions.length;
+		const deleted = state.stickySessions
+			.filter((entry) => targets.has(`${entry.kind}:${entry.key}`))
+			.map((entry) => ({ key: entry.key, kind: entry.kind }));
+		const deletedTargets = new Set(deleted.map((entry) => `${entry.kind}:${entry.key}`));
 		state.stickySessions = state.stickySessions.filter(
 			(entry) => !targets.has(`${entry.kind}:${entry.key}`),
 		);
-		return HttpResponse.json({ deletedCount: before - state.stickySessions.length });
+		return HttpResponse.json({
+			deletedCount: deleted.length,
+			deleted,
+			failed: payload.sessions
+				.filter((session) => !deletedTargets.has(`${session.kind}:${session.key}`))
+				.map((session) => ({
+					key: session.key,
+					kind: session.kind,
+					reason: "not_found",
+				})),
+		});
+	}),
+
+	http.post("/api/sticky-sessions/delete-filtered", async ({ request }) => {
+		const payload = (await parseJsonBody(
+			request,
+			z.object({
+				staleOnly: z.boolean().default(false),
+				accountQuery: z.string().default(""),
+				keyQuery: z.string().default(""),
+			}),
+		)) ?? {
+			staleOnly: false,
+			accountQuery: "",
+			keyQuery: "",
+		};
+		const accountQuery = payload.accountQuery.trim().toLowerCase();
+		const keyQuery = payload.keyQuery.trim().toLowerCase();
+		const matched = state.stickySessions.filter((entry) => {
+			if (payload.staleOnly && !(entry.kind === "prompt_cache" && entry.isStale)) {
+				return false;
+			}
+			if (accountQuery && !entry.displayName.toLowerCase().includes(accountQuery)) {
+				return false;
+			}
+			if (keyQuery && !entry.key.toLowerCase().includes(keyQuery)) {
+				return false;
+			}
+			return true;
+		});
+		const targets = new Set(matched.map((entry) => `${entry.kind}:${entry.key}`));
+		state.stickySessions = state.stickySessions.filter((entry) => !targets.has(`${entry.kind}:${entry.key}`));
+		return HttpResponse.json({ deletedCount: matched.length });
 	}),
 
 	http.post("/api/sticky-sessions/purge", async ({ request }) => {
@@ -576,110 +618,6 @@ export const handlers = [
 
 	http.get("/api/dashboard-auth/session", () => {
 		return HttpResponse.json(state.authSession);
-	}),
-
-	http.get("/api/viewer-auth/session", () => {
-		return HttpResponse.json(state.viewerSession);
-	}),
-
-	http.post("/api/viewer-auth/login", async ({ request }) => {
-		const payload = await parseJsonBody(
-			request,
-			z.object({ apiKey: z.string().min(1) }),
-		);
-		if (!payload?.apiKey) {
-			return HttpResponse.json(
-				{ error: { code: "invalid_api_key", message: "Invalid API key" } },
-				{ status: 401 },
-			);
-		}
-		state.viewerSession = createViewerSession({
-			authenticated: true,
-			apiKey: currentViewerApiKey(),
-			canRegenerate: true,
-		});
-		return HttpResponse.json(state.viewerSession);
-	}),
-
-	http.post("/api/viewer-auth/logout", () => {
-		state.viewerSession = createViewerSession({
-			authenticated: false,
-			apiKey: null,
-			canRegenerate: false,
-		});
-		return HttpResponse.json({ status: "ok" });
-	}),
-
-	http.get("/api/viewer/api-key", () => {
-		if (!state.viewerSession.authenticated) {
-			return HttpResponse.json(
-				{ error: { code: "authentication_required", message: "Authentication is required" } },
-				{ status: 401 },
-			);
-		}
-		return HttpResponse.json(currentViewerApiKey());
-	}),
-
-	http.post("/api/viewer/api-key/regenerate", () => {
-		if (!state.viewerSession.authenticated) {
-			return HttpResponse.json(
-				{ error: { code: "authentication_required", message: "Authentication is required" } },
-				{ status: 401 },
-			);
-		}
-		const regenerated = createViewerApiKeyRegenerateResponse({
-			...currentViewerApiKey(),
-			keyPrefix: "sk-clb-viewer-rot",
-			maskedKey: "sk-clb-viewer-rot...",
-			key: "sk-clb-viewer-rotated",
-		});
-		state.viewerSession = createViewerSession({
-			authenticated: true,
-			apiKey: createViewerApiKey({
-				...regenerated,
-			}),
-			canRegenerate: true,
-		});
-		return HttpResponse.json(regenerated);
-	}),
-
-	http.get("/api/viewer/request-logs", ({ request }) => {
-		if (!state.viewerSession.authenticated) {
-			return HttpResponse.json(
-				{ error: { code: "authentication_required", message: "Authentication is required" } },
-				{ status: 401 },
-			);
-		}
-		const url = new URL(request.url);
-		const filtered = filterRequestLogs(url).map((entry) => ({
-			...entry,
-			accountId: null,
-			apiKeyName: null,
-		}));
-		const total = filtered.length;
-		const limitRaw = Number(url.searchParams.get("limit") ?? 50);
-		const offsetRaw = Number(url.searchParams.get("offset") ?? 0);
-		const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.floor(limitRaw) : 50;
-		const offset = Number.isFinite(offsetRaw) && offsetRaw > 0 ? Math.floor(offsetRaw) : 0;
-		const requests = filtered.slice(offset, offset + limit);
-		return HttpResponse.json(createRequestLogsResponse(requests, total, offset + limit < total));
-	}),
-
-	http.get("/api/viewer/request-logs/options", ({ request }) => {
-		if (!state.viewerSession.authenticated) {
-			return HttpResponse.json(
-				{ error: { code: "authentication_required", message: "Authentication is required" } },
-				{ status: 401 },
-			);
-		}
-		const filtered = filterRequestLogs(new URL(request.url), { includeStatuses: false });
-		return HttpResponse.json(
-			createRequestLogFilterOptions({
-				accountIds: [],
-				modelOptions: requestLogOptionsFromEntries(filtered).modelOptions,
-				statuses: requestLogOptionsFromEntries(filtered).statuses,
-			}),
-		);
 	}),
 
 	http.post("/api/dashboard-auth/password/setup", () => {
@@ -806,6 +744,12 @@ export const handlers = [
 				? { allowedModels: payload.allowedModels }
 				: {}),
 			...(payload.isActive !== undefined ? { isActive: payload.isActive } : {}),
+			...(payload.assignedAccountIds !== undefined
+				? { accountAssignmentScopeEnabled: payload.assignedAccountIds.length > 0 }
+				: {}),
+			...(payload.assignedAccountIds !== undefined
+				? { assignedAccountIds: payload.assignedAccountIds }
+				: {}),
 		};
 
 		if (payload.limits) {

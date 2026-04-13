@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import json
+import os
 import socket
 from functools import lru_cache
-from ipaddress import ip_network
+from ipaddress import ip_address, ip_network
 from pathlib import Path
 from typing import Annotated, Literal
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from app.core.auth.dashboard_mode import DashboardAuthMode, normalize_dashboard_auth_proxy_header
 
 BASE_DIR = Path(__file__).resolve().parents[3]
 
@@ -39,6 +44,43 @@ def _default_http_bridge_instance_id() -> str:
 DEFAULT_HOME_DIR = _default_home_dir()
 DEFAULT_DB_PATH = DEFAULT_HOME_DIR / "store.db"
 DEFAULT_ENCRYPTION_KEY_FILE = DEFAULT_HOME_DIR / "encryption.key"
+type StringListInput = str | list[str] | None
+type OptionalStringInput = str | None
+type ModelContextWindowOverridesInput = str | dict[str, int] | None
+
+
+def _validate_context_window_entries(data: dict) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for k, v in data.items():
+        if isinstance(v, bool):
+            raise TypeError(f"model_context_window_overrides value for '{k}' must be a positive integer, got bool")
+        if not isinstance(v, int):
+            raise TypeError(
+                f"model_context_window_overrides value for '{k}' must be a positive integer, got {type(v).__name__}"
+            )
+        if v <= 0:
+            raise ValueError(f"model_context_window_overrides value for '{k}' must be a positive integer, got {v}")
+        result[str(k)] = v
+    return result
+
+
+def _parse_port_value(raw: str) -> int | None:
+    try:
+        port = int(raw)
+    except ValueError:
+        return None
+    if port <= 0:
+        return None
+    return port
+
+
+def _configured_http_port() -> int:
+    raw_env_port = os.getenv("PORT")
+    if raw_env_port is not None:
+        parsed_env_port = _parse_port_value(raw_env_port.strip())
+        if parsed_env_port is not None:
+            return parsed_env_port
+    return 2455
 
 
 class Settings(BaseSettings):
@@ -90,8 +132,10 @@ class Settings(BaseSettings):
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
+    http_responses_session_bridge_gateway_safe_mode: bool = False
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
+    http_responses_session_bridge_advertise_base_url: str | None = None
     sticky_session_cleanup_enabled: bool = True
     sticky_session_cleanup_interval_seconds: int = Field(default=300, gt=0)
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
@@ -108,10 +152,61 @@ class Settings(BaseSettings):
     model_registry_enabled: bool = True
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"
+    model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
     firewall_trust_proxy_headers: bool = False
     firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
     )
+    dashboard_auth_mode: DashboardAuthMode = DashboardAuthMode.STANDARD
+    dashboard_auth_proxy_header: str = "Remote-User"
+
+    # --- Multi-replica & production settings ---
+    # Prometheus metrics
+    metrics_enabled: bool = False
+    metrics_port: int = 9090
+
+    # Logging
+    log_format: str = "text"  # "text" or "json"
+
+    # Leader election
+    leader_election_enabled: bool = False
+    leader_election_ttl_seconds: int = 600
+
+    # Circuit breaker
+    circuit_breaker_enabled: bool = False
+    circuit_breaker_failure_threshold: int = 5
+    circuit_breaker_recovery_timeout_seconds: int = 60
+
+    # Soft drain & deterministic failover
+    soft_drain_enabled: bool = True
+    deterministic_failover_enabled: bool = True
+    drain_primary_threshold_pct: float = 85.0
+    drain_secondary_threshold_pct: float = 90.0
+    drain_error_window_seconds: float = 60.0
+    drain_error_count_threshold: int = 2
+    probe_quiet_seconds: float = 60.0
+    probe_success_streak_required: int = 3
+
+    # Backpressure
+    backpressure_max_concurrent_requests: int = 0  # 0 = unlimited
+
+    bulkhead_proxy_limit: int = 200
+    bulkhead_dashboard_limit: int = 50
+    dashboard_bootstrap_token: str | None = None
+
+    memory_warning_threshold_mb: int = 0
+    memory_reject_threshold_mb: int = 0
+
+    # OpenTelemetry
+    otel_enabled: bool = False
+    otel_exporter_endpoint: str = ""
+
+    # Shutdown drain
+    shutdown_drain_timeout_seconds: int = 30
+
+    # HTTP connector limits
+    http_connector_limit: int = 100
+    http_connector_limit_per_host: int = 50
 
     # --- Multi-replica & production settings ---
     # Prometheus metrics
@@ -171,7 +266,7 @@ class Settings(BaseSettings):
 
     @field_validator("image_inline_allowed_hosts", mode="before")
     @classmethod
-    def _normalize_image_inline_allowed_hosts(cls, value: object) -> list[str]:
+    def _normalize_image_inline_allowed_hosts(cls, value: StringListInput) -> list[str]:
         if value is None:
             return []
         if isinstance(value, str):
@@ -189,7 +284,7 @@ class Settings(BaseSettings):
 
     @field_validator("firewall_trusted_proxy_cidrs", mode="before")
     @classmethod
-    def _normalize_firewall_trusted_proxy_cidrs(cls, value: object) -> list[str]:
+    def _normalize_firewall_trusted_proxy_cidrs(cls, value: StringListInput) -> list[str]:
         if value is None:
             return []
         cidrs: list[str] = []
@@ -212,9 +307,16 @@ class Settings(BaseSettings):
                 raise ValueError(f"Invalid firewall trusted proxy CIDR: {cidr}") from exc
         return cidrs
 
+    @field_validator("dashboard_auth_proxy_header", mode="before")
+    @classmethod
+    def _normalize_dashboard_auth_proxy_header(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise TypeError("dashboard_auth_proxy_header must be a string")
+        return normalize_dashboard_auth_proxy_header(value)
+
     @field_validator("http_responses_session_bridge_instance_ring", mode="before")
     @classmethod
-    def _normalize_http_bridge_instance_ring(cls, value: object) -> list[str]:
+    def _normalize_http_bridge_instance_ring(cls, value: StringListInput) -> list[str]:
         if value is None:
             return []
         if isinstance(value, str):
@@ -229,6 +331,33 @@ class Settings(BaseSettings):
                         normalized.append(instance_id)
             return normalized
         raise TypeError("http_responses_session_bridge_instance_ring must be a list or comma-separated string")
+
+    @field_validator("http_responses_session_bridge_advertise_base_url", mode="before")
+    @classmethod
+    def _normalize_http_bridge_advertise_base_url(cls, value: OptionalStringInput) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip().rstrip("/")
+            return stripped or None
+        raise TypeError("http_responses_session_bridge_advertise_base_url must be a string")
+
+    @field_validator("model_context_window_overrides", mode="before")
+    @classmethod
+    def _parse_model_context_window_overrides(cls, value: ModelContextWindowOverridesInput) -> dict[str, int]:
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return {}
+            parsed = json.loads(value)
+            if not isinstance(parsed, dict):
+                raise TypeError("model_context_window_overrides must be a JSON object")
+            return _validate_context_window_entries(parsed)
+        if isinstance(value, dict):
+            return _validate_context_window_entries(value)
+        raise TypeError("model_context_window_overrides must be a JSON object string or dict")
 
     @field_validator("upstream_compact_timeout_seconds")
     @classmethod
@@ -247,6 +376,36 @@ class Settings(BaseSettings):
                 "http_responses_session_bridge_instance_id must be explicitly present in "
                 "http_responses_session_bridge_instance_ring"
             )
+        advertise_base_url = self.http_responses_session_bridge_advertise_base_url
+        if advertise_base_url is not None:
+            hostname = urlparse(advertise_base_url).hostname
+            if hostname is None:
+                raise ValueError("http_responses_session_bridge_advertise_base_url must include a valid hostname")
+            if not _bridge_advertise_hostname_is_replica_specific(
+                hostname,
+                instance_id=self.http_responses_session_bridge_instance_id,
+                multi_replica_intent=len(ring) > 1,
+            ):
+                raise ValueError(
+                    "http_responses_session_bridge_advertise_base_url must be replica-specific for bridge routing"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_metrics_port(self) -> "Settings":
+        http_port = _configured_http_port()
+        if self.metrics_port == http_port:
+            raise ValueError(f"metrics_port must not match the main application port ({http_port})")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dashboard_auth_mode(self) -> "Settings":
+        if self.dashboard_auth_mode != DashboardAuthMode.TRUSTED_HEADER:
+            return self
+        if not self.firewall_trust_proxy_headers:
+            raise ValueError("dashboard_auth_mode=trusted_header requires firewall_trust_proxy_headers=true")
+        if not self.firewall_trusted_proxy_cidrs:
+            raise ValueError("dashboard_auth_mode=trusted_header requires non-empty firewall_trusted_proxy_cidrs")
         return self
 
     @model_validator(mode="after")
@@ -259,3 +418,32 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+def _bridge_advertise_hostname_is_replica_specific(
+    hostname: str,
+    *,
+    instance_id: str,
+    multi_replica_intent: bool = False,
+) -> bool:
+    pod_ip = os.getenv("POD_IP")
+    if pod_ip and hostname == pod_ip:
+        return True
+    try:
+        parsed_ip = ip_address(hostname)
+    except ValueError:
+        labels = set(hostname.split("."))
+        pod_name = os.getenv("POD_NAME", "").strip()
+        host_name = os.getenv("HOSTNAME", "").strip()
+        allowed_labels = {
+            label
+            for label in {
+                instance_id.strip(),
+                pod_name,
+                host_name,
+                socket.gethostname().strip(),
+            }
+            if label
+        }
+        return bool(labels & allowed_labels)
+    return parsed_ip.is_loopback and not multi_replica_intent

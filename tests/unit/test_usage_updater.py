@@ -309,17 +309,21 @@ class StubAccountsRepository:
         status: AccountStatus,
         deactivation_reason: str | None = None,
         reset_at: int | None = None,
+        blocked_at: int | None = None,
     ) -> bool:
         account = self.accounts_by_id.get(account_id)
         if account is not None:
             account.status = status
             account.deactivation_reason = deactivation_reason
             account.reset_at = reset_at
+            account.blocked_at = blocked_at
         self.status_updates.append(
             {
                 "account_id": account_id,
                 "status": status,
                 "deactivation_reason": deactivation_reason,
+                "reset_at": reset_at,
+                "blocked_at": blocked_at,
             }
         )
         return True
@@ -457,6 +461,68 @@ async def test_usage_updater_pauses_on_401(monkeypatch) -> None:
         }
     ]
     assert acc.status == AccountStatus.PAUSED
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_deactivates_on_401_account_deactivated_code(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.clients.usage import UsageFetchError
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage_401_deactivated(**_: Any) -> UsagePayload:
+        raise UsageFetchError(
+            401,
+            "Your OpenAI account has been deactivated, please check your email for more information.",
+            code="account_deactivated",
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage_401_deactivated)
+
+    usage_repo = StubUsageRepository()
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+
+    acc = _make_account("acc_401_deactivated", "workspace_401_deactivated", email="dead@example.com")
+    accounts_repo.accounts_by_id[acc.id] = acc
+
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    assert len(accounts_repo.status_updates) == 1
+    update = accounts_repo.status_updates[0]
+    assert update["status"] == AccountStatus.DEACTIVATED
+    assert "401" in update["deactivation_reason"]
+    assert "deactivated" in update["deactivation_reason"].lower()
+
+
+@pytest.mark.asyncio
+async def test_usage_updater_deactivates_on_401_deactivated_message_without_code(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.clients.usage import UsageFetchError
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    async def stub_fetch_usage_401_deactivated_message(**_: Any) -> UsagePayload:
+        raise UsageFetchError(
+            401,
+            "Your OpenAI account has been deactivated, please check your email for more information.",
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage_401_deactivated_message)
+
+    usage_repo = StubUsageRepository()
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+
+    acc = _make_account("acc_401_message", "workspace_401_message", email="message@example.com")
+    accounts_repo.accounts_by_id[acc.id] = acc
+
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    assert len(accounts_repo.status_updates) == 1
+    assert accounts_repo.status_updates[0]["status"] == AccountStatus.DEACTIVATED
 
 
 @pytest.mark.asyncio

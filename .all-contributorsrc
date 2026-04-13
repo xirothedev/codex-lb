@@ -205,7 +205,8 @@
         "code",
         "bug",
         "question",
-        "maintenance"
+        "maintenance",
+        "test"
       ]
     },
     {
@@ -245,7 +246,8 @@
       "profile": "https://github.com/Daltonganger",
       "contributions": [
         "code",
-        "test"
+        "test",
+        "bug"
       ]
     },
     {
@@ -253,6 +255,85 @@
       "name": "Steve Santacroce",
       "avatar_url": "https://avatars.githubusercontent.com/u/336408?v=4",
       "profile": "https://github.com/L1st3r",
+      "contributions": [
+        "code",
+        "test",
+        "bug"
+      ]
+    },
+    {
+      "login": "mhughdo",
+      "name": "Hugh Do",
+      "avatar_url": "https://avatars.githubusercontent.com/u/15611134?v=4",
+      "profile": "https://github.com/mhughdo",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "salwinh",
+      "name": "Hubert Salwin",
+      "avatar_url": "https://avatars.githubusercontent.com/u/6965142?v=4",
+      "profile": "https://github.com/salwinh",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "Daeroni",
+      "name": "Teemu Koskinen",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1648961?v=4",
+      "profile": "https://github.com/Daeroni",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "Felix201209",
+      "name": "Yu Peng Zheng",
+      "avatar_url": "https://avatars.githubusercontent.com/u/151984457?v=4",
+      "profile": "http://felixypz.me",
+      "contributions": [
+        "doc",
+        "code"
+      ]
+    },
+    {
+      "login": "embogomolov",
+      "name": "embogomolov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/185256086?v=4",
+      "profile": "https://github.com/embogomolov",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "SHAREN",
+      "name": "Renat Sharipov",
+      "avatar_url": "https://avatars.githubusercontent.com/u/6128858?v=4",
+      "profile": "https://github.com/SHAREN",
+      "contributions": [
+        "code",
+        "test"
+      ]
+    },
+    {
+      "login": "aruis",
+      "name": "Liu Rui",
+      "avatar_url": "https://avatars.githubusercontent.com/u/1785495?v=4",
+      "profile": "https://ximatai.net",
+      "contributions": [
+        "doc"
+      ]
+    },
+    {
+      "login": "OverHash",
+      "name": "OverHash",
+      "avatar_url": "https://avatars.githubusercontent.com/u/46231745?v=4",
+      "profile": "https://github.com/OverHash",
       "contributions": [
         "code",
         "test"

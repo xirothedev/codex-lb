@@ -28,7 +28,7 @@ from app.db.migrate import (
     run_startup_migrations,
     run_upgrade,
 )
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 
@@ -60,6 +60,52 @@ def _make_account(account_id: str, email: str, plan_type: str) -> Account:
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
     )
+
+
+async def _assert_request_log_retention_for_account_delete(
+    db_url: str,
+    *,
+    sqlite_pragma_foreign_keys: bool = False,
+) -> None:
+    engine = create_async_engine(db_url, future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    try:
+        async with session_factory() as session:
+            if sqlite_pragma_foreign_keys:
+                await session.execute(text("PRAGMA foreign_keys=ON"))
+            account = _make_account("acc_delete_retained", "retained@example.com", "plus")
+            session.add(account)
+            session.add(
+                RequestLog(
+                    id=1,
+                    account_id=account.id,
+                    api_key_id="key_retained",
+                    request_id="req_retained",
+                    requested_at=utcnow(),
+                    model="model-alpha",
+                    input_tokens=10,
+                    output_tokens=5,
+                    status="success",
+                )
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            if sqlite_pragma_foreign_keys:
+                await session.execute(text("PRAGMA foreign_keys=ON"))
+            await session.execute(text("DELETE FROM accounts WHERE id = 'acc_delete_retained'"))
+            await session.commit()
+
+        async with session_factory() as session:
+            if sqlite_pragma_foreign_keys:
+                await session.execute(text("PRAGMA foreign_keys=ON"))
+            rows = list((await session.execute(select(RequestLog).order_by(RequestLog.id.asc()))).scalars().all())
+            assert len(rows) == 1
+            assert rows[0].account_id is None
+            assert rows[0].api_key_id == "key_retained"
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -286,6 +332,31 @@ async def test_postgresql_upgrade_head_from_empty_database(db_setup):
         revision_rows = await session.execute(text("SELECT version_num FROM alembic_version"))
         revisions = sorted(str(row[0]) for row in revision_rows.fetchall())
         assert revisions == [_HEAD_REVISION]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not _is_postgresql_database_url(_DATABASE_URL),
+    reason="PostgreSQL-only account-delete retention migration test",
+)
+async def test_postgresql_head_preserves_request_logs_on_account_delete(db_setup):
+    async with SessionLocal() as session:
+        await session.execute(text("DROP SCHEMA public CASCADE"))
+        await session.execute(text("CREATE SCHEMA public"))
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    await _assert_request_log_retention_for_account_delete(_DATABASE_URL)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_head_preserves_request_logs_on_account_delete(tmp_path):
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'request-log-retention.sqlite'}"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=True))
+    await _assert_request_log_retention_for_account_delete(db_url, sqlite_pragma_foreign_keys=True)
 
 
 @pytest.mark.asyncio

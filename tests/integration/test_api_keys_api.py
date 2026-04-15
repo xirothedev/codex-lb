@@ -752,6 +752,75 @@ async def test_api_key_usage_tracking_and_request_log_link(async_client, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_account_delete_preserves_request_logs_and_api_key_usage(async_client, monkeypatch):
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "retained-usage-key",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1_000_000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key = created.json()["key"]
+    key_id = created.json()["id"]
+
+    account_id = await _import_account(async_client, "acc-retained-usage", "retained-usage@example.com")
+
+    async def fake_stream(_payload, _headers, _access_token, _account_id, base_url=None, raise_for_status=False):
+        usage = {"input_tokens": 12, "output_tokens": 3}
+        event = {"type": "response.completed", "response": {"id": "resp_retained_usage", "usage": usage}}
+        yield f"data: {json.dumps(event)}\n\n"
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    async with async_client.stream(
+        "POST",
+        "/backend-api/codex/responses",
+        headers={"Authorization": f"Bearer {key}"},
+        json={
+            "model": _TEST_MODELS[0],
+            "instructions": "hi",
+            "input": [],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        _ = [line async for line in response.aiter_lines() if line]
+
+    before_delete = await async_client.get("/api/api-keys/")
+    assert before_delete.status_code == 200
+    usage_before = next(row for row in before_delete.json() if row["id"] == key_id)["usageSummary"]
+
+    deleted = await async_client.delete(f"/api/accounts/{account_id}")
+    assert deleted.status_code == 200
+
+    after_delete = await async_client.get("/api/api-keys/")
+    assert after_delete.status_code == 200
+    usage_after = next(row for row in after_delete.json() if row["id"] == key_id)["usageSummary"]
+    assert usage_after == usage_before
+
+    async with SessionLocal() as session:
+        result = await session.execute(select(RequestLog).order_by(RequestLog.requested_at.desc()))
+        logs = list(result.scalars().all())
+        assert len(logs) == 1
+        assert logs[0].api_key_id == key_id
+        assert logs[0].account_id is None
+
+
+@pytest.mark.asyncio
 async def test_api_key_usage_summary_cost_respects_service_tier(async_client, monkeypatch):
     enable = await async_client.put(
         "/api/settings",

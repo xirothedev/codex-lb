@@ -126,8 +126,8 @@ def run_sqlite_to_postgres_sync(
 
     return SyncResult(
         mode=mode,
-        source_url=source_sync_url,
-        target_url=target_sync_url,
+        source_url=_display_url(source_sync_url),
+        target_url=_display_url(target_sync_url),
         copied_tables=tuple(results),
         skipped_transient_tables=_SKIPPED_TRANSIENT_TABLES,
     )
@@ -274,13 +274,20 @@ def _sync_mutable_table(
                 index_elements=[target_table.c[column_name] for column_name in config.pk_columns],
                 set_={column_name: statement.excluded[column_name] for column_name in non_pk_columns},
             )
-            updated += len(rows)
+            result = target_connection.execute(
+                statement.returning(sa.literal_column("xmax = 0").label("inserted"))
+            )
+            for was_inserted in result.scalars():
+                if was_inserted:
+                    inserted += 1
+                else:
+                    updated += 1
         else:
             statement = statement.on_conflict_do_nothing(
                 index_elements=[target_table.c[column_name] for column_name in config.pk_columns]
             )
-        target_connection.execute(statement)
-        inserted += len(rows)
+            result = target_connection.execute(statement.returning(*_pk_returning_columns(target_table, config.pk_columns)))
+            inserted += len(result.fetchall())
 
     target_keys = _fetch_target_keys(target_connection, target_table, config.pk_columns)
     missing_target_keys = target_keys - source_keys
@@ -392,6 +399,17 @@ def _pk_in_predicate(target_table: Table, pk_columns: tuple[str, ...], keys: set
 def _delete_all_rows(target_connection: Connection, target_table: Table) -> int:
     result = target_connection.execute(delete(target_table))
     return int(result.rowcount or 0)
+
+
+def _pk_returning_columns(target_table: Table, pk_columns: tuple[str, ...]) -> tuple[sa.ColumnElement[object], ...]:
+    return tuple(target_table.c[column_name] for column_name in pk_columns)
+
+
+def _display_url(url: str) -> str:
+    try:
+        return make_url(url).render_as_string(hide_password=True)
+    except Exception:
+        return url
 
 
 def _reset_postgres_sequences(target_connection: Connection) -> None:

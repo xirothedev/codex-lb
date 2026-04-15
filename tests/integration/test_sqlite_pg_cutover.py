@@ -57,6 +57,10 @@ def _make_account(account_id: str, email: str) -> Account:
     )
 
 
+def _table_result_by_name(result, table_name: str):
+    return next(row for row in result.copied_tables if row.table_name == table_name)
+
+
 @pytest.mark.asyncio
 @pytest.mark.skipif(_postgres_database_url() is None, reason="requires PostgreSQL test database")
 async def test_sqlite_to_postgres_full_copy_and_final_sync(db_setup, tmp_path: Path):
@@ -155,6 +159,10 @@ async def test_sqlite_to_postgres_full_copy_and_final_sync(db_setup, tmp_path: P
             batch_size=50,
         )
         assert full_result.mode == "full-copy"
+        assert full_result.source_url == source_url
+        assert "@" in full_result.target_url
+        assert "://" in full_result.target_url
+        assert "***" in full_result.target_url or target_database_url == full_result.target_url
 
         async with SessionLocal() as session:
             assert (await session.execute(select(RequestLog))).scalars().all()[0].id == 101
@@ -196,6 +204,26 @@ async def test_sqlite_to_postgres_full_copy_and_final_sync(db_setup, tmp_path: P
             batch_size=50,
         )
         assert final_result.mode == "final-sync"
+
+        accounts_result = _table_result_by_name(final_result, "accounts")
+        assert accounts_result.inserted == 0
+        assert accounts_result.updated == 0
+        assert accounts_result.deleted == 1
+
+        api_keys_result = _table_result_by_name(final_result, "api_keys")
+        assert api_keys_result.inserted == 0
+        assert api_keys_result.updated == 1
+        assert api_keys_result.deleted == 0
+
+        request_logs_result = _table_result_by_name(final_result, "request_logs")
+        assert request_logs_result.inserted == 1
+        assert request_logs_result.updated == 0
+        assert request_logs_result.deleted == 0
+
+        assignments_result = _table_result_by_name(final_result, "api_key_accounts")
+        assert assignments_result.inserted == 0
+        assert assignments_result.updated == 0
+        assert assignments_result.deleted == 1
 
         async with SessionLocal() as session:
             logs = list((await session.execute(select(RequestLog).order_by(RequestLog.id.asc()))).scalars().all())

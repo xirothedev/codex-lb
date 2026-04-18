@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from datetime import timezone
 
 import pytest
 from sqlalchemy import select
@@ -9,8 +10,10 @@ from sqlalchemy import select
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
+from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, RequestLog
 from app.db.session import SessionLocal
+from app.modules.usage.repository import UsageRepository
 
 pytestmark = pytest.mark.integration
 
@@ -192,6 +195,142 @@ async def test_proxy_stream_retries_rate_limit_then_success(async_client, monkey
         assert acc2 is not None
         assert acc1.status == AccountStatus.RATE_LIMITED
         assert acc2.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_proxy_stream_connect_phase_rate_limit_fails_over(async_client, monkeypatch):
+    expected_account_id_1 = await _import_account(async_client, "acc_conn_rl_1", "conn-rl-one@example.com")
+    expected_account_id_2 = await _import_account(async_client, "acc_conn_rl_2", "conn-rl-two@example.com")
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        seen_account_ids.append(account_id)
+        if account_id == "acc_conn_rl_1":
+            raise ProxyResponseError(
+                429,
+                proxy_module.openai_error(
+                    "rate_limit_exceeded",
+                    "slow down",
+                    error_type="rate_limit_error",
+                ),
+            )
+        yield _sse_event(
+            {
+                "type": "response.completed",
+                "response": {"id": "resp_connect_failover", "usage": {"input_tokens": 1, "output_tokens": 1}},
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    assert seen_account_ids[:2] == ["acc_conn_rl_1", "acc_conn_rl_2"]
+
+    async with SessionLocal() as session:
+        first = await session.get(Account, expected_account_id_1)
+        second = await session.get(Account, expected_account_id_2)
+        assert first is not None
+        assert second is not None
+        assert first.status == AccountStatus.RATE_LIMITED
+        assert second.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_proxy_stream_midstream_rate_limit_surfaces_and_does_not_fail_over(async_client, monkeypatch):
+    expected_account_id_1 = await _import_account(async_client, "acc_mid_rl_1", "mid-rl-one@example.com")
+    await _import_account(async_client, "acc_mid_rl_2", "mid-rl-two@example.com")
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        seen_account_ids.append(account_id)
+        yield _sse_event(
+            {
+                "type": "response.created",
+                "response": {"id": "resp_midstream_rl", "status": "in_progress"},
+            }
+        )
+        yield _sse_event(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": "resp_midstream_rl",
+                    "status": "failed",
+                    "error": {"code": "rate_limit_exceeded", "message": "slow down"},
+                    "usage": {"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
+                },
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    events = [json.loads(line[6:]) for line in lines if line.startswith("data: ")]
+    assert [event["type"] for event in events] == ["response.created", "response.failed"]
+    assert seen_account_ids == ["acc_mid_rl_1"]
+
+    async with SessionLocal() as session:
+        first = await session.get(Account, expected_account_id_1)
+        assert first is not None
+        assert first.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_proxy_stream_selects_best_draining_account_when_all_accounts_draining(async_client, monkeypatch):
+    expected_account_id_1 = await _import_account(async_client, "acc_drain_1", "drain-one@example.com")
+    expected_account_id_2 = await _import_account(async_client, "acc_drain_2", "drain-two@example.com")
+    now_epoch = int(utcnow().replace(tzinfo=timezone.utc).timestamp())
+
+    async with SessionLocal() as session:
+        usage_repo = UsageRepository(session)
+        await usage_repo.add_entry(
+            account_id=expected_account_id_1,
+            used_percent=95.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+        await usage_repo.add_entry(
+            account_id=expected_account_id_2,
+            used_percent=88.0,
+            window="primary",
+            reset_at=now_epoch + 3600,
+            window_minutes=300,
+        )
+
+    seen_account_ids: list[str | None] = []
+
+    async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
+        del payload, headers, access_token, base_url, raise_for_status
+        seen_account_ids.append(account_id)
+        yield _sse_event(
+            {
+                "type": "response.completed",
+                "response": {"id": "resp_drain_selection", "usage": {"input_tokens": 1, "output_tokens": 1}},
+            }
+        )
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": [], "stream": True}
+    async with async_client.stream("POST", "/backend-api/codex/responses", json=payload) as resp:
+        assert resp.status_code == 200
+        lines = [line async for line in resp.aiter_lines() if line]
+
+    event = _extract_first_event(lines)
+    assert event["type"] == "response.completed"
+    assert seen_account_ids == ["acc_drain_2"]
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,8 @@ from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
 from app.db.session import SessionLocal
+from app.dependencies import get_proxy_service_for_app
+from app.modules.proxy.load_balancer import AccountSelection
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
@@ -311,6 +313,66 @@ async def test_proxy_compact_usage_limit_marks_account(async_client, monkeypatch
         account = await session.get(Account, expected_account_id)
         assert account is not None
         assert account.status == AccountStatus.RATE_LIMITED
+
+
+@pytest.mark.asyncio
+async def test_proxy_compact_quota_exceeded_fails_over_to_next_account(async_client, app_instance, monkeypatch):
+    first_email = "compact-quota-a@example.com"
+    second_email = "compact-quota-b@example.com"
+    first_account_id = "acc_compact_quota_a"
+    second_account_id = "acc_compact_quota_b"
+    for account_id, email in ((first_account_id, first_email), (second_account_id, second_email)):
+        auth_json = _make_auth_json(account_id, email)
+        files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+        response = await async_client.post("/api/accounts/import", files=files)
+        assert response.status_code == 200
+
+    async with SessionLocal() as session:
+        first_account = await session.get(Account, generate_unique_account_id(first_account_id, first_email))
+        second_account = await session.get(Account, generate_unique_account_id(second_account_id, second_email))
+        assert first_account is not None
+        assert second_account is not None
+
+    service = get_proxy_service_for_app(app_instance)
+
+    async def select_account(*args, exclude_account_ids=None, **kwargs):
+        del args, kwargs
+        excluded = set(exclude_account_ids or ())
+        if first_account.id not in excluded:
+            return AccountSelection(account=first_account, error_message=None)
+        if second_account.id not in excluded:
+            return AccountSelection(account=second_account, error_message=None)
+        return AccountSelection(account=None, error_message="No active accounts")
+
+    monkeypatch.setattr(service._load_balancer, "select_account", select_account)
+
+    captured_account_ids: list[str | None] = []
+
+    async def fake_compact(payload, headers, access_token, account_id):
+        del payload, headers, access_token
+        captured_account_ids.append(account_id)
+        if account_id == first_account_id:
+            raise ProxyResponseError(
+                429,
+                {"error": {"type": "insufficient_quota", "code": "quota_exceeded", "message": "quota reached"}},
+            )
+        return CompactResponsePayload.model_validate({"object": "response.compaction", "output": []})
+
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+
+    payload = {"model": "gpt-5.1", "instructions": "hi", "input": []}
+    response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
+    assert response.status_code == 200
+    assert response.json()["object"] == "response.compaction"
+    assert captured_account_ids[:2] == [first_account_id, second_account_id]
+
+    async with SessionLocal() as session:
+        failed = await session.get(Account, generate_unique_account_id(first_account_id, first_email))
+        fallback = await session.get(Account, generate_unique_account_id(second_account_id, second_email))
+        assert failed is not None
+        assert fallback is not None
+        assert failed.status == AccountStatus.QUOTA_EXCEEDED
+        assert fallback.status == AccountStatus.ACTIVE
 
 
 @pytest.mark.asyncio

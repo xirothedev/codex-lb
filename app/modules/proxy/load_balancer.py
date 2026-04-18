@@ -25,6 +25,7 @@ from app.core.balancer import (
 )
 from app.core.balancer.types import UpstreamError
 from app.core.config.settings import get_settings
+from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, drain_transitions_total
 from app.core.openai.model_registry import get_model_registry
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
 from app.core.resilience.degradation import get_status as get_degradation_status
@@ -59,6 +60,29 @@ _RECOVERABLE_STATUSES = frozenset(
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
+
+
+def _soft_drain_metrics_enabled() -> bool:
+    return PROMETHEUS_AVAILABLE and get_settings().metrics_enabled and drain_transitions_total is not None
+
+
+def _health_tier_label(tier: int) -> str:
+    if tier == HEALTH_TIER_HEALTHY:
+        return "healthy"
+    if tier == HEALTH_TIER_DRAINING:
+        return "draining"
+    if tier == HEALTH_TIER_PROBING:
+        return "probing"
+    return str(tier)
+
+
+def _observe_drain_transition(from_tier: int, to_tier: int) -> None:
+    if from_tier == to_tier or not _soft_drain_metrics_enabled() or drain_transitions_total is None:
+        return
+    drain_transitions_total.labels(
+        from_tier=_health_tier_label(from_tier),
+        to_tier=_health_tier_label(to_tier),
+    ).inc()
 
 
 @dataclass
@@ -1139,6 +1163,7 @@ def _state_from_account(
 
     settings = get_settings()
     if getattr(settings, "soft_drain_enabled", True):
+        previous_tier = runtime.health_tier
         new_tier = evaluate_health_tier(
             AccountState(
                 account_id=account.id,
@@ -1166,10 +1191,12 @@ def _state_from_account(
             runtime.drain_entered_at = None
             runtime.probe_success_streak = 0
         runtime.health_tier = new_tier
+        _observe_drain_transition(previous_tier, new_tier)
     else:
         new_tier = HEALTH_TIER_HEALTHY
         runtime.drain_entered_at = None
         runtime.probe_success_streak = 0
+        _observe_drain_transition(runtime.health_tier, HEALTH_TIER_HEALTHY)
         runtime.health_tier = HEALTH_TIER_HEALTHY
 
     return AccountState(

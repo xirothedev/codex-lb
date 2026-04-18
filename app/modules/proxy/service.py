@@ -33,7 +33,7 @@ from app.core.auth.refresh import (
 )
 from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
 from app.core.balancer.rendezvous_hash import select_node
-from app.core.balancer.types import ClassifiedFailure, UpstreamError
+from app.core.balancer.types import ClassifiedFailure, FailurePhase, UpstreamError
 from app.core.clients.proxy import (
     ProxyResponseError,
     filter_inbound_headers,
@@ -72,6 +72,8 @@ from app.core.metrics.prometheus import (
     bridge_reattach_total,
     bridge_same_account_takeover_total,
     bridge_soft_local_rebind_total,
+    client_exposed_errors_total,
+    failover_total,
 )
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
@@ -205,6 +207,26 @@ _ACCOUNT_RECOVERY_RETRY_CODES = frozenset(
 _TRANSIENT_RETRY_CODES = frozenset({"server_error"})
 _MAX_TRANSIENT_SAME_ACCOUNT_RETRIES = 3
 _COMPACT_MAX_ACCOUNT_ATTEMPTS = 2
+
+
+def _deterministic_failover_metrics_enabled() -> bool:
+    return PROMETHEUS_AVAILABLE and get_settings().metrics_enabled
+
+
+def _observe_failover_decision(*, transport: str, failure_class: str, action: str) -> None:
+    if not _deterministic_failover_metrics_enabled():
+        return
+    if failover_total is not None:
+        failover_total.labels(
+            transport=transport,
+            failure_class=failure_class,
+            action=action,
+        ).inc()
+    if action == "surface" and client_exposed_errors_total is not None:
+        client_exposed_errors_total.labels(
+            transport=transport,
+            failure_class=failure_class,
+        ).inc()
 
 
 @dataclass(frozen=True, slots=True)
@@ -988,6 +1010,11 @@ class ProxyService:
                             classified["failure_class"],
                             action,
                         )
+                        _observe_failover_decision(
+                            transport="compact",
+                            failure_class=classified["failure_class"],
+                            action=action,
+                        )
                         if action == "failover_next":
                             last_exc = exc
                             excluded_account_ids.add(account.id)
@@ -1711,7 +1738,32 @@ class ProxyService:
                     await self._pause_account_for_upstream_401(account)
                     excluded_account_ids.add(account.id)
                     continue
-                await self._handle_websocket_connect_error(account, exc)
+                classified = await self._handle_websocket_connect_error(account, exc)
+                if getattr(get_settings(), "deterministic_failover_enabled", True):
+                    action = failover_decision(
+                        failure_class=classified["failure_class"],
+                        downstream_visible=False,
+                        candidates_remaining=3 - _account_attempt - 1,
+                    )
+                else:
+                    action = "surface"
+                logger.info(
+                    "Failover decision request_id=%s transport=websocket account_id=%s "
+                    "attempt=%d failure_class=%s action=%s",
+                    request_state.request_log_id or request_state.request_id,
+                    account.id,
+                    _account_attempt + 1,
+                    classified["failure_class"],
+                    action,
+                )
+                _observe_failover_decision(
+                    transport="websocket",
+                    failure_class=classified["failure_class"],
+                    action=action,
+                )
+                if action == "failover_next":
+                    excluded_account_ids.add(account.id)
+                    continue
                 error = _parse_openai_error(exc.payload)
                 error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
                 error_message = error.message if error else None
@@ -3657,13 +3709,15 @@ class ProxyService:
                 except ApiKeyInvalidError as exc:
                     raise ProxyAuthError(str(exc)) from exc
 
-    async def _handle_websocket_connect_error(self, account: Account, exc: ProxyResponseError) -> None:
+    async def _handle_websocket_connect_error(self, account: Account, exc: ProxyResponseError) -> ClassifiedFailure:
         error = _parse_openai_error(exc.payload)
         error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
-        await self._handle_stream_error(
+        return await self._handle_stream_error(
             account,
             _upstream_error_from_openai(error),
             error_code,
+            phase="connect",
+            http_status=exc.status_code,
         )
 
     async def _relay_upstream_websocket_messages(
@@ -4670,6 +4724,11 @@ class ProxyService:
                                     classified["failure_class"],
                                     action,
                                 )
+                                _observe_failover_decision(
+                                    transport="stream",
+                                    failure_class=classified["failure_class"],
+                                    action=action,
+                                )
                                 if action == "failover_next":
                                     last_transient_exc = tex
                                     excluded_account_ids.add(account.id)
@@ -5531,13 +5590,14 @@ class ProxyService:
         account: Account,
         error: UpstreamError,
         code: str,
+        phase: FailurePhase = "first_event",
         http_status: int | None = None,
     ) -> ClassifiedFailure:
         classified = classify_upstream_failure(
             error_code=code,
             error=error,
             http_status=http_status,
-            phase="first_event",
+            phase=phase,
         )
         if classified["failure_class"] == "rate_limit":
             await self._load_balancer.mark_rate_limit(account, error)

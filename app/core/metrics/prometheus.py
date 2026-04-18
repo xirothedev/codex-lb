@@ -171,6 +171,24 @@ if PROMETHEUS_AVAILABLE:
         ["kind"],
         registry=REGISTRY,
     )
+    failover_total = Counter(
+        "codex_lb_failover_total",
+        "Total deterministic failover decisions by transport, failure class, and action",
+        ["transport", "failure_class", "action"],
+        registry=REGISTRY,
+    )
+    drain_transitions_total = Counter(
+        "codex_lb_drain_transitions_total",
+        "Total soft-drain health tier transitions",
+        ["from_tier", "to_tier"],
+        registry=REGISTRY,
+    )
+    client_exposed_errors_total = Counter(
+        "codex_lb_client_exposed_errors_total",
+        "Total deterministic failover-eligible errors surfaced to clients",
+        ["transport", "failure_class"],
+        registry=REGISTRY,
+    )
 
     def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
@@ -211,6 +229,9 @@ else:
     bridge_local_rebind_total: CounterLike | None = None
     bridge_forward_latency_seconds: HistogramLike | None = None
     bridge_public_contract_error_total: CounterLike | None = None
+    failover_total: CounterLike | None = None
+    drain_transitions_total: CounterLike | None = None
+    client_exposed_errors_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -239,6 +260,9 @@ __all__ = [
     "bridge_same_account_takeover_total",
     "bridge_soft_local_rebind_total",
     "circuit_breaker_state",
+    "client_exposed_errors_total",
+    "drain_transitions_total",
+    "failover_total",
     "make_scrape_registry",
     "mark_process_dead",
     "prometheus_client",

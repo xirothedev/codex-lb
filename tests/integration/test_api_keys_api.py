@@ -15,7 +15,7 @@ from app.core.clients.proxy import ProxyResponseError
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel, get_model_registry
 from app.core.openai.models import OpenAIResponsePayload
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, RequestLog
+from app.db.models import Account, AccountStatus, ApiKeyUsageReservation, RequestLog
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
 
@@ -2083,6 +2083,148 @@ async def test_update_key_reset_usage_requires_explicit_action(async_client):
         assert len(limits) == 1
         assert limits[0].current_value == 0
         assert limits[0].reset_at > original_reset_at
+
+
+@pytest.mark.asyncio
+async def test_update_key_renews_without_rotating_key_identity(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "renew-integration-key",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    payload = created.json()
+    key_id = payload["id"]
+    key_prefix = payload["keyPrefix"]
+
+    original_reset_at = utcnow() + timedelta(hours=4)
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        assert len(limits) == 1
+        limits[0].current_value = 444
+        limits[0].reset_at = original_reset_at
+        session.add(
+            RequestLog(
+                account_id=None,
+                api_key_id=key_id,
+                request_id="renew-log-1",
+                model="gpt-5",
+                input_tokens=100,
+                output_tokens=20,
+                cached_input_tokens=10,
+                cost_usd=0.12,
+                status="ok",
+            )
+        )
+        await session.commit()
+
+    renewed = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"resetUsage": True, "expiresAt": "2026-05-01T00:00:00Z"},
+    )
+    assert renewed.status_code == 200
+    renewed_payload = renewed.json()
+    assert renewed_payload["id"] == key_id
+    assert renewed_payload["keyPrefix"] == key_prefix
+    assert renewed_payload["expiresAt"] == "2026-05-01T00:00:00Z"
+
+    listed = await async_client.get("/api/api-keys/")
+    assert listed.status_code == 200
+    listed_payload = next(row for row in listed.json() if row["id"] == key_id)
+    assert listed_payload["usageSummary"]["requestCount"] == 1
+    assert listed_payload["usageSummary"]["totalTokens"] == 120
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        assert limits[0].current_value == 0
+        assert limits[0].reset_at > original_reset_at
+
+
+@pytest.mark.asyncio
+async def test_update_key_reset_usage_conflicts_with_in_flight_reservations(async_client):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={
+            "name": "renew-conflict-integration",
+            "limits": [
+                {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1000},
+            ],
+        },
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+
+    original_reset_at = utcnow() + timedelta(hours=4)
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        limits[0].current_value = 333
+        limits[0].reset_at = original_reset_at
+        session.add(
+            ApiKeyUsageReservation(
+                id="renew-conflict-reservation",
+                api_key_id=key_id,
+                model="gpt-5",
+                status="reserved",
+            )
+        )
+        await session.commit()
+
+    renewed = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"resetUsage": True, "expiresAt": "2026-05-01T00:00:00Z"},
+    )
+    assert renewed.status_code == 409
+    assert renewed.json()["error"]["code"] == "api_key_usage_in_flight"
+
+    async with SessionLocal() as session:
+        repo = ApiKeysRepository(session)
+        limits = await repo.get_limits_by_key(key_id)
+        assert limits[0].current_value == 333
+        assert limits[0].reset_at == original_reset_at
+
+
+@pytest.mark.asyncio
+async def test_update_key_renew_writes_audit_event(async_client, monkeypatch):
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "renew-audit-key"},
+    )
+    assert created.status_code == 200
+    key_id = created.json()["id"]
+
+    calls: list[tuple[str, str | None, dict[str, object] | None]] = []
+
+    def capture(action: str, *, actor_ip: str | None = None, details=None, request_id=None) -> None:
+        del request_id
+        calls.append((action, actor_ip, details))
+
+    monkeypatch.setattr("app.modules.api_keys.api.AuditService.log_async", capture)
+
+    renewed = await async_client.patch(
+        f"/api/api-keys/{key_id}",
+        json={"resetUsage": True, "expiresAt": "2026-05-01T00:00:00Z"},
+    )
+    assert renewed.status_code == 200
+
+    assert calls == [
+        (
+            "api_key_renewed",
+            "127.0.0.1",
+            {
+                "key_id": key_id,
+                "previous_expires_at": None,
+                "new_expires_at": "2026-05-01T00:00:00",
+                "reset_usage": True,
+            },
+        )
+    ]
 
 
 @pytest.mark.asyncio

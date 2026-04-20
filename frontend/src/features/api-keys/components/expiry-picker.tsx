@@ -119,7 +119,7 @@ export function ExpiryPicker({ value, onChange }: ExpiryPickerProps) {
                 onClick={() => handlePreset(preset.days)}
               >
                 {preset.label}
-                <span className="ml-auto text-xs text-muted-foreground">
+                <span aria-hidden="true" className="ml-auto text-xs text-muted-foreground">
                   {format(addDays(new Date(), preset.days), "yyyy-MM-dd")}
                 </span>
               </OptionItem>
@@ -134,7 +134,7 @@ export function ExpiryPicker({ value, onChange }: ExpiryPickerProps) {
               <CalendarIcon className="size-4" />
               Custom date...
               {value && activePresetDays === null && (
-                <span className="ml-auto text-xs text-muted-foreground">
+                <span aria-hidden="true" className="ml-auto text-xs text-muted-foreground">
                   {format(value, "yyyy-MM-dd")}
                 </span>
               )}

@@ -1,4 +1,4 @@
-import { Ellipsis, KeyRound, Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { Ellipsis, KeyRound, Pencil, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 
 import { EmptyState } from "@/components/empty-state";
 import { Button } from "@/components/ui/button";
@@ -71,7 +71,7 @@ function formatUsageSummary(
 
 function getUsageValue(apiKey: ApiKey): string {
   if (!apiKey.usageSummary) {
-    return "No Usage";
+    return "No lifetime usage";
   }
 
   return formatUsageSummary(
@@ -94,11 +94,12 @@ export type ApiKeyTableProps = {
   keys: ApiKey[];
   busy: boolean;
   onEdit: (apiKey: ApiKey) => void;
+  onRenew: (apiKey: ApiKey) => void;
   onDelete: (apiKey: ApiKey) => void;
   onRegenerate: (apiKey: ApiKey) => void;
 };
 
-export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiKeyTableProps) {
+export function ApiKeyTable({ keys, busy, onEdit, onRenew, onDelete, onRegenerate }: ApiKeyTableProps) {
   if (keys.length === 0) {
     return <EmptyState icon={KeyRound} title="No API keys created yet" />;
   }
@@ -111,7 +112,7 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
           <TableHead className="w-[20%] min-w-[12rem] pl-4 text-[11px] uppercase tracking-wider text-muted-foreground/80">Name</TableHead>
           <TableHead className="w-[10%] min-w-[8rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Prefix</TableHead>
           <TableHead className="w-[9%] min-w-[6.5rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Models</TableHead>
-          <TableHead className="w-[26%] min-w-[17rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Usage</TableHead>
+          <TableHead className="w-[26%] min-w-[17rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Usage (lifetime)</TableHead>
           <TableHead className="w-[14%] min-w-[12rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Limit</TableHead>
           <TableHead className="w-[8%] min-w-[7rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Expiry</TableHead>
           <TableHead className="w-[7%] min-w-[5.5rem] text-[11px] uppercase tracking-wider text-muted-foreground/80">Status</TableHead>
@@ -147,6 +148,10 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
                     <DropdownMenuItem onClick={() => onEdit(apiKey)}>
                       <Pencil className="size-4" />
                       Edit
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => onRenew(apiKey)}>
+                      <RotateCcw className="size-4" />
+                      Renew
                     </DropdownMenuItem>
                     <DropdownMenuItem onClick={() => onRegenerate(apiKey)}>
                       <RefreshCw className="size-4" />

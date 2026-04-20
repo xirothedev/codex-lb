@@ -54,6 +54,7 @@ const ApiKeyUpdatePayloadSchema = z
 	.object({
 		name: z.string().optional(),
 		allowedModels: z.array(z.string()).nullable().optional(),
+		expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
 		isActive: z.boolean().optional(),
 		assignedAccountIds: z.array(z.string()).optional(),
 		resetUsage: z.boolean().optional(),
@@ -743,6 +744,7 @@ export const handlers = [
 			...(payload.allowedModels !== undefined
 				? { allowedModels: payload.allowedModels }
 				: {}),
+			...(payload.expiresAt !== undefined ? { expiresAt: payload.expiresAt } : {}),
 			...(payload.isActive !== undefined ? { isActive: payload.isActive } : {}),
 			...(payload.assignedAccountIds !== undefined
 				? { accountAssignmentScopeEnabled: payload.assignedAccountIds.length > 0 }
@@ -761,6 +763,13 @@ export const handlers = [
 				currentValue: 0,
 				modelFilter: l.modelFilter ?? null,
 				resetAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+			}));
+		}
+
+		if (payload.resetUsage && !overrides.limits) {
+			overrides.limits = existing.limits.map((limit) => ({
+				...limit,
+				currentValue: 0,
 			}));
 		}
 

@@ -18,6 +18,9 @@ const ApiKeyCreateDialog = lazy(() =>
 const ApiKeyEditDialog = lazy(() =>
   import("@/features/api-keys/components/api-key-edit-dialog").then((m) => ({ default: m.ApiKeyEditDialog })),
 );
+const ApiKeyRenewDialog = lazy(() =>
+  import("@/features/api-keys/components/api-key-renew-dialog").then((m) => ({ default: m.ApiKeyRenewDialog })),
+);
 
 export type ApiKeysSectionProps = {
   apiKeyAuthEnabled: boolean;
@@ -40,6 +43,7 @@ export function ApiKeysSection({
 
   const createDialog = useDialogState();
   const editDialog = useDialogState<ApiKey>();
+  const renewDialog = useDialogState<ApiKey>();
   const deleteDialog = useDialogState<ApiKey>();
   const createdDialog = useDialogState<string>();
 
@@ -73,6 +77,13 @@ export function ApiKeysSection({
     await updateMutation.mutateAsync({ keyId: editDialog.data.id, payload });
   };
 
+  const handleRenew = async (payload: ApiKeyUpdateRequest) => {
+    if (!renewDialog.data) {
+      return;
+    }
+    await updateMutation.mutateAsync({ keyId: renewDialog.data.id, payload });
+  };
+
   return (
     <section className="space-y-3 rounded-xl border bg-card p-5">
       <div className="flex items-center justify-between">
@@ -102,6 +113,7 @@ export function ApiKeysSection({
         keys={keys}
         busy={busy}
         onEdit={(apiKey) => editDialog.show(apiKey)}
+        onRenew={(apiKey) => renewDialog.show(apiKey)}
         onDelete={(apiKey) => deleteDialog.show(apiKey)}
         onRegenerate={(apiKey) => {
           void regenerateMutation.mutateAsync(apiKey.id).then((result) => {
@@ -123,6 +135,14 @@ export function ApiKeysSection({
         apiKey={editDialog.data}
         onOpenChange={editDialog.onOpenChange}
         onSubmit={handleUpdate}
+      />
+
+      <ApiKeyRenewDialog
+        open={renewDialog.open}
+        busy={updateMutation.isPending}
+        apiKey={renewDialog.data}
+        onOpenChange={renewDialog.onOpenChange}
+        onSubmit={handleRenew}
       />
 
       <ApiKeyCreatedDialog

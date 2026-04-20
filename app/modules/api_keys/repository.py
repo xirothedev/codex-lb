@@ -347,6 +347,14 @@ class ApiKeysRepository:
         await self._session.commit()
         return result.scalar_one_or_none() is not None
 
+    async def count_in_flight_usage_reservations_by_key(self, key_id: str) -> int:
+        stmt = select(func.count(ApiKeyUsageReservation.id)).where(
+            ApiKeyUsageReservation.api_key_id == key_id,
+            ApiKeyUsageReservation.status.in_(("reserved", "settling")),
+        )
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one() or 0)
+
     async def try_reserve_usage(
         self,
         limit_id: int,

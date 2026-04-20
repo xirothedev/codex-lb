@@ -14,6 +14,7 @@ import { ApiDetail } from "./api-detail";
 
 const callbacks = {
 	onEdit: vi.fn(),
+	onRenew: vi.fn(),
 	onDelete: vi.fn(),
 	onRegenerate: vi.fn(),
 	onToggleActive: vi.fn(),
@@ -199,18 +200,24 @@ describe("ApiDetail", () => {
 		expect(onDelete).toHaveBeenCalledWith(apiKey);
 	});
 
-	it("opens the actions menu and routes edit and regenerate actions", async () => {
+	it("opens the actions menu and routes edit, renew, and regenerate actions", async () => {
 		const user = userEvent.setup();
 		const apiKey = createApiKey();
 		const onEdit = vi.fn();
+		const onRenew = vi.fn();
 		const onRegenerate = vi.fn();
 
-		renderApiDetail({ apiKey, onEdit, onRegenerate });
+		renderApiDetail({ apiKey, onEdit, onRenew, onRegenerate });
 
 		await user.click(screen.getByRole("button", { name: "Actions" }));
 		await user.click(screen.getByRole("menuitem", { name: "Edit" }));
 
 		expect(onEdit).toHaveBeenCalledWith(apiKey);
+
+		await user.click(screen.getByRole("button", { name: "Actions" }));
+		await user.click(screen.getByRole("menuitem", { name: "Renew" }));
+
+		expect(onRenew).toHaveBeenCalledWith(apiKey);
 
 		await user.click(screen.getByRole("button", { name: "Actions" }));
 		await user.click(screen.getByRole("menuitem", { name: "Regenerate" }));

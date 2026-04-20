@@ -368,6 +368,13 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
             items=reservation.items,
         )
 
+    async def count_in_flight_usage_reservations_by_key(self, key_id: str) -> int:
+        return sum(
+            1
+            for reservation in self._reservations.values()
+            if reservation.api_key_id == key_id and reservation.status in {"reserved", "settling"}
+        )
+
 
 def _compute_increment(limit: ApiKeyLimit, input_tokens: int, output_tokens: int, cost_microdollars: int) -> int:
     if limit.limit_type == LimitType.TOTAL_TOKENS:
@@ -802,6 +809,97 @@ async def test_update_key_normalizes_timezone_aware_expiry_to_utc_naive() -> Non
     stored = await repo.get_by_id(created.id)
     assert stored is not None
     assert stored.expires_at == datetime(2026, 4, 1, 12, 30, 0)
+
+
+@pytest.mark.asyncio
+async def test_update_key_renews_same_raw_key_and_resets_limit_usage() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="renew-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=100)],
+        )
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    limits[0].current_value = 88
+    old_reset_at = limits[0].reset_at
+    old_hash = (await repo.get_by_id(created.id)).key_hash  # type: ignore[union-attr]
+    old_prefix = (await repo.get_by_id(created.id)).key_prefix  # type: ignore[union-attr]
+
+    updated = await service.update_key(
+        created.id,
+        ApiKeyUpdateData(
+            expires_at=datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc),
+            expires_at_set=True,
+            reset_usage=True,
+        ),
+    )
+
+    validated = await service.validate_key(created.key)
+    refreshed_limits = await repo.get_limits_by_key(created.id)
+    stored = await repo.get_by_id(created.id)
+
+    assert validated.id == created.id
+    assert updated.id == created.id
+    assert updated.key_prefix == old_prefix
+    assert stored is not None
+    assert stored.key_hash == old_hash
+    assert refreshed_limits[0].current_value == 0
+    assert refreshed_limits[0].reset_at > old_reset_at
+    assert updated.expires_at == datetime(2026, 5, 1, 0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_update_key_reset_usage_rejects_in_flight_reservations() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="renew-conflict-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[LimitRuleInput(limit_type="total_tokens", limit_window="weekly", max_value=100)],
+        )
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    limits[0].current_value = 88
+    original_reset_at = limits[0].reset_at
+    reservation_id = "reservation-renew-conflict"
+    await repo.create_usage_reservation(
+        reservation_id,
+        key_id=created.id,
+        model="gpt-5",
+        items=[
+            UsageReservationItemData(
+                limit_id=limits[0].id,
+                limit_type=limits[0].limit_type,
+                reserved_delta=1,
+                expected_reset_at=limits[0].reset_at,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="in-flight usage"):
+        await service.update_key(
+            created.id,
+            ApiKeyUpdateData(
+                expires_at=datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc),
+                expires_at_set=True,
+                reset_usage=True,
+            ),
+        )
+
+    refreshed_limits = await repo.get_limits_by_key(created.id)
+    stored = await repo.get_by_id(created.id)
+    assert refreshed_limits[0].current_value == 88
+    assert refreshed_limits[0].reset_at == original_reset_at
+    assert stored is not None
+    assert stored.expires_at is None
 
 
 @pytest.mark.asyncio

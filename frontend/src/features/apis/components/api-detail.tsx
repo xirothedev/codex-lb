@@ -32,6 +32,7 @@ export type ApiDetailProps = {
 	usage7DayError?: string | null;
 	busy: boolean;
 	onEdit: (apiKey: ApiKey) => void;
+	onRenew: (apiKey: ApiKey) => void;
 	onDelete: (apiKey: ApiKey) => void;
 	onRegenerate: (apiKey: ApiKey) => void;
 	onToggleActive: (apiKey: ApiKey) => void;
@@ -55,6 +56,7 @@ export function ApiDetail({
 	usage7DayError = null,
 	busy,
 	onEdit,
+	onRenew,
 	onDelete,
 	onRegenerate,
 	onToggleActive,
@@ -129,6 +131,10 @@ export function ApiDetail({
 						<DropdownMenuItem onClick={() => onEdit(apiKey)}>
 							<Pencil className="size-4" />
 							Edit
+						</DropdownMenuItem>
+						<DropdownMenuItem onClick={() => onRenew(apiKey)}>
+							<RefreshCw className="size-4" />
+							Renew
 						</DropdownMenuItem>
 						<DropdownMenuItem onClick={() => onRegenerate(apiKey)}>
 							<RefreshCw className="size-4" />

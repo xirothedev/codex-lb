@@ -4,7 +4,7 @@ from fastapi import APIRouter, Body, Depends, Request, Response
 
 from app.core.audit.service import AuditService
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
-from app.core.exceptions import DashboardBadRequestError, DashboardNotFoundError
+from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
 from app.dependencies import ApiKeysContext, get_api_keys_context
 from app.modules.api_keys.schemas import (
     ApiKeyCreateRequest,
@@ -21,6 +21,7 @@ from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyNotFoundError,
     ApiKeyUpdateData,
+    ApiKeyUsageInFlightError,
     LimitRuleInput,
 )
 
@@ -151,6 +152,12 @@ async def update_api_key(
     context: ApiKeysContext = Depends(get_api_keys_context),
 ) -> ApiKeyResponse:
     fields = payload.model_fields_set
+    is_renew_request = bool(payload.reset_usage) and "expires_at" in fields
+    previous_expires_at = None
+    if is_renew_request:
+        existing_rows = await context.service.list_keys()
+        existing = next((row for row in existing_rows if row.id == key_id), None)
+        previous_expires_at = existing.expires_at if existing is not None else None
 
     limits_set = "limits" in fields or "weekly_token_limit" in fields
     limit_inputs = _build_limit_inputs(payload) if limits_set else None
@@ -180,6 +187,8 @@ async def update_api_key(
         row = await context.service.update_key(key_id, update)
     except ApiKeyNotFoundError as exc:
         raise DashboardNotFoundError(str(exc)) from exc
+    except ApiKeyUsageInFlightError as exc:
+        raise DashboardConflictError(str(exc), code="api_key_usage_in_flight") from exc
     except ValueError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
     if "is_active" in fields and payload.is_active is False and row.is_active is False:
@@ -187,6 +196,17 @@ async def update_api_key(
             "api_key_revoked",
             actor_ip=request.client.host if request.client else None,
             details={"key_id": row.id},
+        )
+    if is_renew_request:
+        AuditService.log_async(
+            "api_key_renewed",
+            actor_ip=request.client.host if request.client else None,
+            details={
+                "key_id": row.id,
+                "previous_expires_at": previous_expires_at.isoformat() if previous_expires_at is not None else None,
+                "new_expires_at": row.expires_at.isoformat() if row.expires_at is not None else None,
+                "reset_usage": True,
+            },
         )
     return _to_response(row)
 

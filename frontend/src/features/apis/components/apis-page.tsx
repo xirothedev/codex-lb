@@ -30,6 +30,11 @@ const ApiKeyEditDialog = lazy(() =>
 		default: m.ApiKeyEditDialog,
 	})),
 );
+const ApiKeyRenewDialog = lazy(() =>
+	import("@/features/api-keys/components/api-key-renew-dialog").then((m) => ({
+		default: m.ApiKeyRenewDialog,
+	})),
+);
 const ApiKeyCreatedDialog = lazy(() =>
 	import("@/features/api-keys/components/api-key-created-dialog").then((m) => ({
 		default: m.ApiKeyCreatedDialog,
@@ -48,6 +53,7 @@ export function ApisPage() {
 
 	const createDialog = useDialogState();
 	const editDialog = useDialogState<ApiKey>();
+	const renewDialog = useDialogState<ApiKey>();
 	const deleteDialog = useDialogState<ApiKey>();
 	const createdDialog = useDialogState<string>();
 
@@ -106,6 +112,11 @@ export function ApisPage() {
 		await updateMutation.mutateAsync({ keyId: editDialog.data.id, payload });
 	};
 
+	const handleRenew = async (payload: ApiKeyUpdateRequest) => {
+		if (!renewDialog.data) return;
+		await updateMutation.mutateAsync({ keyId: renewDialog.data.id, payload });
+	};
+
 	return (
 		<div className="animate-fade-in-up space-y-6">
 			<div>
@@ -157,6 +168,7 @@ export function ApisPage() {
 						usage7DayError={usage7DayError}
 						busy={mutationBusy}
 						onEdit={(apiKey) => editDialog.show(apiKey)}
+						onRenew={(apiKey) => renewDialog.show(apiKey)}
 						onToggleActive={(apiKey) => {
 							void updateMutation
 								.mutateAsync({
@@ -192,6 +204,14 @@ export function ApisPage() {
 					apiKey={editDialog.data}
 					onOpenChange={editDialog.onOpenChange}
 					onSubmit={handleUpdate}
+				/>
+
+				<ApiKeyRenewDialog
+					open={renewDialog.open}
+					busy={updateMutation.isPending}
+					apiKey={renewDialog.data}
+					onOpenChange={renewDialog.onOpenChange}
+					onSubmit={handleRenew}
 				/>
 
 				<ApiKeyCreatedDialog

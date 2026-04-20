@@ -46,6 +46,9 @@ export function ApiKeyInfo({
 		? (usageSummary ?? apiKey.usageSummary)
 		: (usageSummary ?? null);
 	const hasUsage = usage && usage.requestCount > 0;
+	const usageLabel = allowUsageSummaryFallback
+		? "Usage (lifetime)"
+		: "Usage (7 days)";
 
 	return (
 		<div className="space-y-4 rounded-lg border bg-muted/30 p-4">
@@ -85,7 +88,7 @@ export function ApiKeyInfo({
 					</dd>
 				</div>
 				<div className="flex items-start justify-between gap-2">
-					<dt className="text-muted-foreground">Usage</dt>
+					<dt className="text-muted-foreground">{usageLabel}</dt>
 					<dd className="text-right tabular-nums">
 						{hasUsage ? (
 							<span>

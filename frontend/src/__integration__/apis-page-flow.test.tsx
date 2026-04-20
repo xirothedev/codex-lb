@@ -89,6 +89,53 @@ describe("apis page integration", () => {
 		});
 	});
 
+	it("renews a key without showing a regenerated secret dialog", async () => {
+		const user = userEvent.setup();
+		const capturedBodies: Array<Record<string, unknown>> = [];
+		server.use(
+			http.patch("/api/api-keys/:keyId", async ({ params, request }) => {
+				const body = (await request.json()) as Record<string, unknown>;
+				capturedBodies.push(body);
+				return HttpResponse.json(
+					createApiKey({
+						id: String(params.keyId),
+						name: "Default key",
+						expiresAt: "2026-05-01T23:59:59.000Z",
+						limits: [
+							{
+								id: 101,
+								limitType: "total_tokens",
+								limitWindow: "weekly",
+								maxValue: 100000,
+								currentValue: 0,
+								modelFilter: null,
+								resetAt: "2026-05-08T23:59:59.000Z",
+							},
+						],
+					}),
+				);
+			}),
+		);
+
+		renderWithProviders(<App />);
+		expect(await screen.findByRole("heading", { name: "Default key" })).toBeInTheDocument();
+
+		await user.click(screen.getByRole("button", { name: "Actions" }));
+		await user.click(screen.getByRole("menuitem", { name: "Renew" }));
+
+		const renewDialog = await screen.findByRole("dialog", { name: "Renew API key" });
+		await user.click(within(renewDialog).getByRole("button", { name: /No expiration/i }));
+		await user.click(screen.getByRole("button", { name: "30 days" }));
+		await user.click(within(renewDialog).getByRole("button", { name: "Renew" }));
+
+		await waitFor(() => {
+			expect(capturedBodies).toHaveLength(1);
+		});
+		expect(capturedBodies[0].resetUsage).toBe(true);
+		expect(typeof capturedBodies[0].expiresAt).toBe("string");
+		expect(screen.queryByRole("dialog", { name: "API key created" })).not.toBeInTheDocument();
+	});
+
 	it("shows backend errors from API mutations in the page alert", async () => {
 		const user = userEvent.setup();
 		server.use(

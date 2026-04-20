@@ -92,6 +92,8 @@ class ApiKeysRepositoryProtocol(Protocol):
 
     async def reset_limit(self, limit_id: int, *, expected_reset_at: datetime, new_reset_at: datetime) -> bool: ...
 
+    async def count_in_flight_usage_reservations_by_key(self, key_id: str) -> int: ...
+
     async def try_reserve_usage(
         self,
         limit_id: int,
@@ -174,6 +176,10 @@ class ApiKeyRateLimitExceededError(ValueError):
     def __init__(self, *, message: str, reset_at: datetime) -> None:
         super().__init__(message)
         self.reset_at = reset_at
+
+
+class ApiKeyUsageInFlightError(ValueError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +326,12 @@ class ApiKeysService:
         existing = await self._repository.get_by_id(key_id)
         if existing is None:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+        if payload.reset_usage:
+            in_flight_reservations = await self._repository.count_in_flight_usage_reservations_by_key(key_id)
+            if in_flight_reservations:
+                raise ApiKeyUsageInFlightError(
+                    "API key has in-flight usage reservations; retry after active requests complete"
+                )
 
         if payload.allowed_models_set:
             allowed_models = _normalize_allowed_models(payload.allowed_models)

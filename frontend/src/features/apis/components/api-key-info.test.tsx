@@ -86,6 +86,7 @@ describe("ApiKeyInfo", () => {
 			/>,
 		);
 
+		expect(screen.getByText("Usage (lifetime)")).toBeInTheDocument();
 		expect(screen.getByText(/50K tok/)).toBeInTheDocument();
 		expect(screen.getByText(/10K cached/)).toBeInTheDocument();
 		expect(screen.getByText(/150 req/)).toBeInTheDocument();

@@ -41,3 +41,4 @@
    Note: This requires "Allow edits from maintainers" to be enabled on the PR.
 
 7. **Best Practices**: Commit often in small units. Do not commit directly to `main`. Always check `git diff` before pushing.
+8. **Deployment Rule**: For any request that builds an image, deploys, redeploys, rolls back, or cuts over the VPS, load and follow `/codex-lb-deploy` before running deploy commands.

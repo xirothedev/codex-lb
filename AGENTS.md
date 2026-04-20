@@ -58,3 +58,10 @@ Prompting cue (use when writing docs):
 - Verify before archive: `/opsx:verify <change>`
 - Sync delta specs → main specs: `/opsx:sync <change>`
 - Archive: `/opsx:archive <change>`
+
+## Deployment Workflow (Mandatory)
+
+- Before any task that builds an image, deploys, redeploys, rolls back, runs a canary, cuts over production, or inspects live VPS release state, you **must** use the `/codex-lb-deploy` skill.
+- Treat `.agents/skills/codex-lb-deploy/SKILL.md` as the SSOT for deploy assumptions, rollout order, candidate checks, and rollback handling.
+- Do not reuse the retired `codex-lb-upstream-sync-vps-deploy` name or older SQLite-first deploy assumptions. Map any such request to `/codex-lb-deploy`.
+- On deploy turns, inspect the live database backend and migration mode first. Do not assume SQLite or PostgreSQL without checking the running container env.

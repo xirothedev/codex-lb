@@ -252,16 +252,15 @@ function buildConcurrencyLimitInputs(
 function parseConcurrencyLimitInputs(
   limits: Record<keyof ProxyEndpointConcurrencyLimits, string>,
 ): ProxyEndpointConcurrencyLimits | null {
-  const parsedEntries = CONCURRENCY_LIMIT_FIELDS.map(({ key }) => {
+  const parsedLimits = {} as ProxyEndpointConcurrencyLimits;
+
+  for (const { key } of CONCURRENCY_LIMIT_FIELDS) {
     const value = limits[key].trim();
     if (!/^\d+$/.test(value)) {
       return null;
     }
-    return [key, Number.parseInt(value, 10)] as const;
-  });
-  if (parsedEntries.some((entry) => entry === null)) {
-    return null;
+    parsedLimits[key] = Number.parseInt(value, 10);
   }
 
-  return Object.fromEntries(parsedEntries) as ProxyEndpointConcurrencyLimits;
+  return parsedLimits;
 }

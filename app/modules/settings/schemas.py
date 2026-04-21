@@ -1,8 +1,19 @@
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.modules.shared.schemas import DashboardModel
+
+
+class ProxyEndpointConcurrencyLimitsSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    responses: int = Field(ge=0)
+    responses_compact: int = Field(ge=0)
+    chat_completions: int = Field(ge=0)
+    transcriptions: int = Field(ge=0)
+    models: int = Field(ge=0)
+    usage: int = Field(ge=0)
 
 
 class DashboardSettingsResponse(DashboardModel):
@@ -11,6 +22,7 @@ class DashboardSettingsResponse(DashboardModel):
     prefer_earlier_reset_accounts: bool
     routing_strategy: str = Field(pattern=r"^(usage_weighted|round_robin|capacity_weighted)$")
     openai_cache_affinity_max_age_seconds: int = Field(gt=0)
+    proxy_endpoint_concurrency_limits: ProxyEndpointConcurrencyLimitsSchema
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int = Field(gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float = Field(ge=0.0, le=100.0)
@@ -29,6 +41,7 @@ class DashboardSettingsUpdateRequest(DashboardModel):
     prefer_earlier_reset_accounts: bool
     routing_strategy: str | None = Field(default=None, pattern=r"^(usage_weighted|round_robin|capacity_weighted)$")
     openai_cache_affinity_max_age_seconds: int | None = Field(default=None, gt=0)
+    proxy_endpoint_concurrency_limits: ProxyEndpointConcurrencyLimitsSchema | None = None
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = Field(default=None, gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool | None = None
     sticky_reallocation_budget_threshold_pct: float | None = Field(default=None, ge=0.0, le=100.0)

@@ -12,7 +12,23 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
-import type { DashboardSettings, SettingsUpdateRequest } from "@/features/settings/schemas";
+import type {
+  DashboardSettings,
+  ProxyEndpointConcurrencyLimits,
+  SettingsUpdateRequest,
+} from "@/features/settings/schemas";
+
+const CONCURRENCY_LIMIT_FIELDS: Array<{
+  key: keyof ProxyEndpointConcurrencyLimits;
+  label: string;
+}> = [
+  { key: "responses", label: "Responses" },
+  { key: "responses_compact", label: "Responses compact" },
+  { key: "chat_completions", label: "Chat completions" },
+  { key: "transcriptions", label: "Transcriptions" },
+  { key: "models", label: "Models" },
+  { key: "usage", label: "Usage" },
+];
 
 export type RoutingSettingsProps = {
   settings: DashboardSettings;
@@ -24,6 +40,9 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const [cacheAffinityTtl, setCacheAffinityTtl] = useState(
     String(settings.openaiCacheAffinityMaxAgeSeconds),
   );
+  const [concurrencyLimits, setConcurrencyLimits] = useState<Record<keyof ProxyEndpointConcurrencyLimits, string>>(
+    () => buildConcurrencyLimitInputs(settings.proxyEndpointConcurrencyLimits),
+  );
 
   const save = (patch: Partial<SettingsUpdateRequest>) =>
     void onSave(buildSettingsUpdateRequest(settings, patch));
@@ -32,6 +51,12 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
+  const parsedConcurrencyLimits = parseConcurrencyLimitInputs(concurrencyLimits);
+  const concurrencyLimitsChanged =
+    parsedConcurrencyLimits !== null &&
+    CONCURRENCY_LIMIT_FIELDS.some(
+      ({ key }) => parsedConcurrencyLimits[key] !== settings.proxyEndpointConcurrencyLimits[key],
+    );
 
   return (
     <section className="rounded-xl border bg-card p-5">
@@ -153,8 +178,90 @@ export function RoutingSettings({ settings, busy, onSave }: RoutingSettingsProps
               </Button>
             </div>
           </div>
+
+          <div className="flex flex-col gap-3 p-3">
+            <div className="space-y-1">
+              <p className="text-sm font-medium">Proxy endpoint concurrency limits</p>
+              <p className="text-xs text-muted-foreground">
+                Limit in-flight requests per proxy family on this replica. Set `0` to keep a family unlimited.
+              </p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              {CONCURRENCY_LIMIT_FIELDS.map(({ key, label }) => {
+                const inputId = `proxy-endpoint-limit-${key}`;
+                return (
+                  <div key={key} className="space-y-1.5">
+                    <label htmlFor={inputId} className="text-xs font-medium text-foreground">
+                      {label}
+                    </label>
+                    <Input
+                      id={inputId}
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      value={concurrencyLimits[key]}
+                      disabled={busy}
+                      onChange={(event) =>
+                        setConcurrencyLimits((current) => ({
+                          ...current,
+                          [key]: event.target.value,
+                        }))
+                      }
+                      className="h-8 text-xs"
+                    />
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 text-xs"
+                disabled={busy || parsedConcurrencyLimits === null || !concurrencyLimitsChanged}
+                onClick={() => {
+                  if (parsedConcurrencyLimits !== null) {
+                    void save({ proxyEndpointConcurrencyLimits: parsedConcurrencyLimits });
+                  }
+                }}
+              >
+                Save concurrency limits
+              </Button>
+            </div>
+          </div>
         </div>
       </div>
     </section>
   );
+}
+
+function buildConcurrencyLimitInputs(
+  limits: ProxyEndpointConcurrencyLimits,
+): Record<keyof ProxyEndpointConcurrencyLimits, string> {
+  return {
+    responses: String(limits.responses),
+    responses_compact: String(limits.responses_compact),
+    chat_completions: String(limits.chat_completions),
+    transcriptions: String(limits.transcriptions),
+    models: String(limits.models),
+    usage: String(limits.usage),
+  };
+}
+
+function parseConcurrencyLimitInputs(
+  limits: Record<keyof ProxyEndpointConcurrencyLimits, string>,
+): ProxyEndpointConcurrencyLimits | null {
+  const parsedEntries = CONCURRENCY_LIMIT_FIELDS.map(({ key }) => {
+    const value = limits[key].trim();
+    if (!/^\d+$/.test(value)) {
+      return null;
+    }
+    return [key, Number.parseInt(value, 10)] as const;
+  });
+  if (parsedEntries.some((entry) => entry === null)) {
+    return null;
+  }
+
+  return Object.fromEntries(parsedEntries) as ProxyEndpointConcurrencyLimits;
 }

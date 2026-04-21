@@ -34,11 +34,20 @@ describe("useSettings", () => {
     await waitFor(() => expect(result.current.settingsQuery.isSuccess).toBe(true));
     expect(result.current.settingsQuery.data?.stickyThreadsEnabled).toBeTypeOf("boolean");
     expect(result.current.settingsQuery.data?.openaiCacheAffinityMaxAgeSeconds).toBeTypeOf("number");
+    expect(result.current.settingsQuery.data?.proxyEndpointConcurrencyLimits.responses).toBeTypeOf("number");
 
     await result.current.updateSettingsMutation.mutateAsync({
       stickyThreadsEnabled: false,
       preferEarlierResetAccounts: true,
       openaiCacheAffinityMaxAgeSeconds: 180,
+      proxyEndpointConcurrencyLimits: {
+        responses: 1,
+        responses_compact: 0,
+        chat_completions: 0,
+        transcriptions: 0,
+        models: 0,
+        usage: 0,
+      },
       importWithoutOverwrite: true,
       totpRequiredOnLogin: false,
       apiKeyAuthEnabled: true,

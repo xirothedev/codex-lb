@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 from anyio import to_thread
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.auth import DEFAULT_PLAN

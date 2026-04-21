@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config.settings import get_settings
 from app.db.models import DashboardSettings
+from app.modules.proxy.request_admission import DEFAULT_PROXY_ENDPOINT_CONCURRENCY_LIMITS
 
 _SETTINGS_ID = 1
 
@@ -25,6 +26,7 @@ class SettingsRepository:
             prefer_earlier_reset_accounts=True,
             routing_strategy="capacity_weighted",
             openai_cache_affinity_max_age_seconds=get_settings().openai_cache_affinity_max_age_seconds,
+            proxy_endpoint_concurrency_limits=DEFAULT_PROXY_ENDPOINT_CONCURRENCY_LIMITS.copy(),
             import_without_overwrite=True,
             totp_required_on_login=False,
             password_hash=None,
@@ -54,6 +56,7 @@ class SettingsRepository:
         prefer_earlier_reset_accounts: bool | None = None,
         routing_strategy: str | None = None,
         openai_cache_affinity_max_age_seconds: int | None = None,
+        proxy_endpoint_concurrency_limits: dict[str, int] | None = None,
         http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int | None = None,
         http_responses_session_bridge_gateway_safe_mode: bool | None = None,
         sticky_reallocation_budget_threshold_pct: float | None = None,
@@ -72,6 +75,8 @@ class SettingsRepository:
             settings.routing_strategy = routing_strategy
         if openai_cache_affinity_max_age_seconds is not None:
             settings.openai_cache_affinity_max_age_seconds = openai_cache_affinity_max_age_seconds
+        if proxy_endpoint_concurrency_limits is not None:
+            settings.proxy_endpoint_concurrency_limits = dict(proxy_endpoint_concurrency_limits)
         if http_responses_session_bridge_prompt_cache_idle_ttl_seconds is not None:
             settings.http_responses_session_bridge_prompt_cache_idle_ttl_seconds = (
                 http_responses_session_bridge_prompt_cache_idle_ttl_seconds

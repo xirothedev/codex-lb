@@ -2620,19 +2620,10 @@ class ProxyService:
             if _is_proxy_budget_exhausted_error(exc):
                 await self._emit_websocket_connect_timeout(
                     websocket=websocket,
-
                     client_send_lock=client_send_lock,
                     account_id=None,
                     api_key=api_key,
                     request_state=request_state,
-                    status_code=503,
-                    payload=openai_error(
-                        error_code,
-                        error_message,
-                        error_type="server_error",
-                    ),
-                    error_code=error_code,
-                    error_message=error_message,
                 )
                 return None
             raise

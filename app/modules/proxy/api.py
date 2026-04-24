@@ -68,16 +68,6 @@ from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
-from app.modules.proxy.request_admission import (
-    ProxyEndpointConcurrencyLease,
-    ProxyRequestFamily,
-    build_proxy_endpoint_concurrency_error_response,
-    get_proxy_endpoint_concurrency_limiter,
-    proxy_endpoint_concurrency_limits_from_mapping,
-    proxy_request_family_for_path,
-    record_proxy_endpoint_concurrency_rejection,
-    reject_proxy_endpoint_concurrency_websocket,
-)
 from app.modules.proxy.request_policy import (
     apply_api_key_enforcement,
     openai_invalid_payload_error,
@@ -201,30 +191,17 @@ async def responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
-    family, admission = await _acquire_proxy_endpoint_concurrency_lease(websocket.url.path)
-    if family is not None and admission is None:
-        record_proxy_endpoint_concurrency_rejection(
-            family=family,
-            transport="websocket",
-            method="WEBSOCKET",
-            path=websocket.url.path,
-        )
-        await reject_proxy_endpoint_concurrency_websocket(websocket.receive, websocket.send, family=family)
-        return
-    try:
-        turn_state = proxy_service_module.ensure_downstream_turn_state(websocket.headers)
-        await websocket.accept(headers=proxy_service_module.build_downstream_turn_state_accept_headers(turn_state))
-        forwarded_headers = dict(websocket.headers)
-        forwarded_headers.setdefault("x-codex-turn-state", turn_state)
-        await context.service.proxy_responses_websocket(
-            websocket,
-            forwarded_headers,
-            codex_session_affinity=True,
-            openai_cache_affinity=True,
-            api_key=api_key,
-        )
-    finally:
-        await _release_proxy_endpoint_concurrency_lease(admission)
+    turn_state = proxy_service_module.ensure_downstream_turn_state(websocket.headers)
+    await websocket.accept(headers=proxy_service_module.build_downstream_turn_state_accept_headers(turn_state))
+    forwarded_headers = dict(websocket.headers)
+    forwarded_headers.setdefault("x-codex-turn-state", turn_state)
+    await context.service.proxy_responses_websocket(
+        websocket,
+        forwarded_headers,
+        codex_session_affinity=True,
+        openai_cache_affinity=True,
+        api_key=api_key,
+    )
 
 
 @v1_router.post(
@@ -334,30 +311,17 @@ async def v1_responses_websocket(
     if denial is not None:
         await websocket.send_denial_response(denial)
         return
-    family, admission = await _acquire_proxy_endpoint_concurrency_lease(websocket.url.path)
-    if family is not None and admission is None:
-        record_proxy_endpoint_concurrency_rejection(
-            family=family,
-            transport="websocket",
-            method="WEBSOCKET",
-            path=websocket.url.path,
-        )
-        await reject_proxy_endpoint_concurrency_websocket(websocket.receive, websocket.send, family=family)
-        return
-    try:
-        turn_state = proxy_service_module.ensure_downstream_turn_state(websocket.headers)
-        await websocket.accept(headers=proxy_service_module.build_downstream_turn_state_accept_headers(turn_state))
-        forwarded_headers = dict(websocket.headers)
-        forwarded_headers.setdefault("x-codex-turn-state", turn_state)
-        await context.service.proxy_responses_websocket(
-            websocket,
-            forwarded_headers,
-            codex_session_affinity=False,
-            openai_cache_affinity=True,
-            api_key=api_key,
-        )
-    finally:
-        await _release_proxy_endpoint_concurrency_lease(admission)
+    turn_state = proxy_service_module.ensure_downstream_turn_state(websocket.headers)
+    await websocket.accept(headers=proxy_service_module.build_downstream_turn_state_accept_headers(turn_state))
+    forwarded_headers = dict(websocket.headers)
+    forwarded_headers.setdefault("x-codex-turn-state", turn_state)
+    await context.service.proxy_responses_websocket(
+        websocket,
+        forwarded_headers,
+        codex_session_affinity=False,
+        openai_cache_affinity=True,
+        api_key=api_key,
+    )
 
 
 @router.get("/models", response_model=CodexModelsResponse)
@@ -365,13 +329,7 @@ async def models(
     request: Request,
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    admission, rejection = await _reject_or_acquire_http_proxy_endpoint_concurrency(request)
-    if rejection is not None:
-        return rejection
-    try:
-        return await _build_codex_models_response(api_key)
-    finally:
-        await _release_proxy_endpoint_concurrency_lease(admission)
+    return await _build_codex_models_response(api_key)
 
 
 @v1_router.get("/models", response_model=ModelListResponse)
@@ -379,13 +337,7 @@ async def v1_models(
     request: Request,
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
-    admission, rejection = await _reject_or_acquire_http_proxy_endpoint_concurrency(request)
-    if rejection is not None:
-        return rejection
-    try:
-        return await _build_models_response(api_key)
-    finally:
-        await _release_proxy_endpoint_concurrency_lease(admission)
+    return await _build_models_response(api_key)
 
 
 @v1_router.get("/usage", response_model=V1UsageResponse)
@@ -393,28 +345,22 @@ async def v1_usage(
     request: Request,
     api_key: ApiKeyData = Security(validate_usage_api_key),
 ) -> Response:
-    admission, rejection = await _reject_or_acquire_http_proxy_endpoint_concurrency(request)
-    if rejection is not None:
-        return rejection
-    try:
-        async with get_background_session() as session:
-            service = ApiKeysService(ApiKeysRepository(session))
-            usage = await service.get_key_usage_summary_for_self(api_key.id)
-            aggregate_limits = await _build_aggregate_credit_limits(session)
-        if usage is None:
-            raise ProxyAuthError("Invalid API key")
+    async with get_background_session() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        usage = await service.get_key_usage_summary_for_self(api_key.id)
+        aggregate_limits = await _build_aggregate_credit_limits(session)
+    if usage is None:
+        raise ProxyAuthError("Invalid API key")
 
-        return JSONResponse(
-            content=V1UsageResponse(
-                request_count=usage.request_count,
-                total_tokens=usage.total_tokens,
-                cached_input_tokens=usage.cached_input_tokens,
-                total_cost_usd=usage.total_cost_usd,
-                limits=_build_v1_usage_limits(usage, aggregate_limits),
-            ).model_dump(mode="json")
-        )
-    finally:
-        await _release_proxy_endpoint_concurrency_lease(admission)
+    return JSONResponse(
+        content=V1UsageResponse(
+            request_count=usage.request_count,
+            total_tokens=usage.total_tokens,
+            cached_input_tokens=usage.cached_input_tokens,
+            total_cost_usd=usage.total_cost_usd,
+            limits=_build_v1_usage_limits(usage, aggregate_limits),
+        ).model_dump(mode="json")
+    )
 
 
 def _build_v1_usage_limits(
@@ -840,10 +786,6 @@ async def v1_chat_completions(
     except ValidationError as exc:
         error = openai_validation_error(exc)
         return _logged_error_json_response(request, 400, error, headers=rate_limit_headers)
-    admission, rejection = await _reject_or_acquire_http_proxy_endpoint_concurrency(request)
-    if rejection is not None:
-        return rejection
-    release_admission_on_exit = True
     reservation: ApiKeyUsageReservationData | None = None
     try:
         reservation = await _enforce_request_limits(
@@ -874,12 +816,8 @@ async def v1_chat_completions(
         if payload.stream:
             stream_options = payload.stream_options
             include_usage = bool(stream_options and stream_options.include_usage)
-            release_admission_on_exit = False
             return StreamingResponse(
-                _release_proxy_endpoint_concurrency_after_stream(
-                    stream_chat_chunks(stream_with_first, model=responses_payload.model, include_usage=include_usage),
-                    admission,
-                ),
+                stream_chat_chunks(stream_with_first, model=responses_payload.model, include_usage=include_usage),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", **rate_limit_headers},
             )
@@ -904,9 +842,6 @@ async def v1_chat_completions(
         if reservation is not None:
             await _release_reservation(reservation)
         raise
-    finally:
-        if release_admission_on_exit:
-            await _release_proxy_endpoint_concurrency_lease(admission)
 
 
 async def _stream_responses(
@@ -930,10 +865,6 @@ async def _stream_responses(
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
-    admission, rejection = await _reject_or_acquire_http_proxy_endpoint_concurrency(request)
-    if rejection is not None:
-        return rejection
-    release_admission_on_exit = True
     owns_reservation = api_key_reservation_override is None
     reservation: ApiKeyUsageReservationData | None = None
     try:
@@ -1006,9 +937,8 @@ async def _stream_responses(
                 exc.payload,
                 headers=rate_limit_headers,
             )
-        release_admission_on_exit = False
         return StreamingResponse(
-            _release_proxy_endpoint_concurrency_after_stream(_prepend_first(first, stream), admission),
+            _prepend_first(first, stream),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", **turn_state_headers, **rate_limit_headers},
         )
@@ -1016,9 +946,6 @@ async def _stream_responses(
         if owns_reservation and reservation is not None:
             await _release_reservation(reservation)
         raise
-    finally:
-        if release_admission_on_exit:
-            await _release_proxy_endpoint_concurrency_lease(admission)
 
 
 def _strip_internal_bridge_headers(headers: Mapping[str, str]) -> dict[str, str]:
@@ -1038,84 +965,78 @@ async def _collect_responses(
 ) -> Response:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
-    admission, rejection = await _reject_or_acquire_http_proxy_endpoint_concurrency(request)
-    if rejection is not None:
-        return rejection
+    reservation = await _enforce_request_limits(
+        api_key,
+        request_model=payload.model,
+        request_service_tier=payload.service_tier,
+    )
+    rate_limit_headers = await context.service.rate_limit_headers()
+    bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
+    downstream_turn_state = (
+        proxy_service_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
+    )
+    turn_state_headers = (
+        proxy_service_module.build_downstream_turn_state_response_headers(downstream_turn_state)
+        if downstream_turn_state is not None
+        else {}
+    )
+    payload.stream = True
+    if prefer_http_bridge:
+        stream = context.service.stream_http_responses(
+            payload,
+            request.headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=True,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=suppress_text_done_events,
+            downstream_turn_state=downstream_turn_state,
+        )
+    else:
+        stream = context.service.stream_responses(
+            payload,
+            request.headers,
+            codex_session_affinity=codex_session_affinity,
+            propagate_http_errors=True,
+            openai_cache_affinity=openai_cache_affinity,
+            api_key=api_key,
+            api_key_reservation=reservation,
+            suppress_text_done_events=suppress_text_done_events,
+        )
     try:
-        reservation = await _enforce_request_limits(
-            api_key,
-            request_model=payload.model,
-            request_service_tier=payload.service_tier,
-        )
-        rate_limit_headers = await context.service.rate_limit_headers()
-        bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
-        downstream_turn_state = (
-            proxy_service_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
-        )
-        turn_state_headers = (
-            proxy_service_module.build_downstream_turn_state_response_headers(downstream_turn_state)
-            if downstream_turn_state is not None
-            else {}
-        )
-        payload.stream = True
-        if prefer_http_bridge:
-            stream = context.service.stream_http_responses(
-                payload,
-                request.headers,
-                codex_session_affinity=codex_session_affinity,
-                propagate_http_errors=True,
-                openai_cache_affinity=openai_cache_affinity,
-                api_key=api_key,
-                api_key_reservation=reservation,
-                suppress_text_done_events=suppress_text_done_events,
-                downstream_turn_state=downstream_turn_state,
-            )
-        else:
-            stream = context.service.stream_responses(
-                payload,
-                request.headers,
-                codex_session_affinity=codex_session_affinity,
-                propagate_http_errors=True,
-                openai_cache_affinity=openai_cache_affinity,
-                api_key=api_key,
-                api_key_reservation=reservation,
-                suppress_text_done_events=suppress_text_done_events,
-            )
-        try:
-            response_payload = await _collect_responses_payload(stream)
-        except ProxyResponseError as exc:
-            await _release_reservation(reservation)
-            error = _parse_error_envelope(exc.payload)
-            return _logged_error_json_response(
-                request,
-                exc.status_code,
-                error.model_dump(mode="json", exclude_none=True),
-                headers=rate_limit_headers,
-            )
-
-        if isinstance(response_payload, OpenAIResponsePayload):
-            if response_payload.status == "failed":
-                error_payload = _error_envelope_from_response(response_payload.error)
-                status_code = _status_for_error(error_payload.error)
-                return _logged_error_json_response(
-                    request,
-                    status_code,
-                    error_payload.model_dump(mode="json", exclude_none=True),
-                    headers={**turn_state_headers, **rate_limit_headers},
-                )
-            return JSONResponse(
-                content=response_payload.model_dump(mode="json", exclude_none=True),
-                headers={**turn_state_headers, **rate_limit_headers},
-            )
-        status_code = _status_for_error(response_payload.error)
+        response_payload = await _collect_responses_payload(stream)
+    except ProxyResponseError as exc:
+        await _release_reservation(reservation)
+        error = _parse_error_envelope(exc.payload)
         return _logged_error_json_response(
             request,
-            status_code,
-            response_payload.model_dump(mode="json", exclude_none=True),
+            exc.status_code,
+            error.model_dump(mode="json", exclude_none=True),
+            headers=rate_limit_headers,
+        )
+
+    if isinstance(response_payload, OpenAIResponsePayload):
+        if response_payload.status == "failed":
+            error_payload = _error_envelope_from_response(response_payload.error)
+            status_code = _status_for_error(error_payload.error)
+            return _logged_error_json_response(
+                request,
+                status_code,
+                error_payload.model_dump(mode="json", exclude_none=True),
+                headers={**turn_state_headers, **rate_limit_headers},
+            )
+        return JSONResponse(
+            content=response_payload.model_dump(mode="json", exclude_none=True),
             headers={**turn_state_headers, **rate_limit_headers},
         )
-    finally:
-        await _release_proxy_endpoint_concurrency_lease(admission)
+    status_code = _status_for_error(response_payload.error)
+    return _logged_error_json_response(
+        request,
+        status_code,
+        response_payload.model_dump(mode="json", exclude_none=True),
+        headers={**turn_state_headers, **rate_limit_headers},
+    )
 
 
 @router.post("/responses/compact", response_model=CompactResponseResult)
@@ -1165,9 +1086,6 @@ async def _compact_responses(
 ) -> JSONResponse:
     apply_api_key_enforcement(payload, api_key)
     validate_model_access(api_key, payload.model)
-    admission, rejection = await _reject_or_acquire_http_proxy_endpoint_concurrency(request)
-    if rejection is not None:
-        return rejection
     reservation: ApiKeyUsageReservationData | None = None
     try:
         reservation = await _enforce_request_limits(
@@ -1208,7 +1126,6 @@ async def _compact_responses(
         )
     finally:
         await _release_reservation(reservation)
-        await _release_proxy_endpoint_concurrency_lease(admission)
     return JSONResponse(
         content=result.model_dump(mode="json", exclude_none=True),
         headers=rate_limit_headers,
@@ -1224,9 +1141,6 @@ async def _transcribe_request(
     api_key: ApiKeyData | None,
 ) -> JSONResponse:
     validate_model_access(api_key, _TRANSCRIPTION_MODEL)
-    admission, rejection = await _reject_or_acquire_http_proxy_endpoint_concurrency(request)
-    if rejection is not None:
-        return rejection
     reservation: ApiKeyUsageReservationData | None = None
     try:
         reservation = await _enforce_request_limits(
@@ -1254,7 +1168,6 @@ async def _transcribe_request(
         )
     finally:
         await _release_reservation(reservation)
-        await _release_proxy_endpoint_concurrency_lease(admission)
     return JSONResponse(content=result, headers=rate_limit_headers)
 
 

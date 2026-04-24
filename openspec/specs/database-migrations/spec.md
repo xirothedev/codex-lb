@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define codex-lb database migration behavior so schema upgrades are deterministic, operationally safe, and CI-enforced under Alembic.
+See context docs for background.
 
 ## Requirements
 
@@ -134,3 +134,4 @@ The database schema MUST preserve `request_logs` rows when an account is deleted
 - **WHEN** a fresh database is migrated to Alembic `head`
 - **THEN** `request_logs.account_id` is nullable
 - **AND** its foreign key behavior preserves the log row by setting `account_id` to `NULL` on account deletion
+

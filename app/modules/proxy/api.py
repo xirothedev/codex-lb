@@ -44,6 +44,7 @@ from app.core.openai.models import (
 from app.core.openai.parsing import parse_response_payload
 from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
+from app.core.resilience.overload import is_local_overload_error_code, merge_retry_after_headers
 from app.core.runtime_logging import log_error_response
 from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
@@ -65,6 +66,7 @@ from app.modules.api_keys.service import (
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.proxy import service as proxy_service_module
+from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.request_admission import (
     ProxyEndpointConcurrencyLease,
@@ -92,6 +94,11 @@ from app.modules.proxy.schemas import (
     ReasoningLevelSchema,
     V1UsageLimitResponse,
     V1UsageResponse,
+)
+from app.modules.proxy.types import (
+    CreditStatusDetailsData,
+    RateLimitStatusPayloadData,
+    RateLimitWindowSnapshotData,
 )
 from app.modules.usage.repository import UsageRepository
 
@@ -134,7 +141,7 @@ v1_ws_router = APIRouter(
 )
 usage_router = APIRouter(
     tags=["proxy"],
-    dependencies=[Depends(validate_codex_usage_identity), Depends(set_openai_error_format)],
+    dependencies=[Depends(set_openai_error_format)],
 )
 transcribe_router = APIRouter(
     prefix="/backend-api",
@@ -466,6 +473,78 @@ def _apply_credit_override(
         model_filter=None,
         reset_at=aggregate_limit.reset_at,
         source="api_key_override",
+    )
+
+
+async def _build_codex_usage_payload_for_api_key(api_key: ApiKeyData) -> RateLimitStatusPayloadData:
+    async with get_background_session() as session:
+        service = ApiKeysService(ApiKeysRepository(session))
+        usage = await service.get_key_usage_summary_for_self(api_key.id)
+
+    if usage is None:
+        raise ProxyAuthError("Invalid API key")
+
+    key_limits = [_to_v1_usage_limit_response(limit) for limit in usage.limits]
+    primary_credit_limit = _select_codex_usage_limit(key_limits, "5h") or _select_codex_usage_limit(key_limits, "daily")
+    secondary_credit_limit = (
+        _select_codex_usage_limit(key_limits, "7d")
+        or _select_codex_usage_limit(key_limits, "weekly")
+        or _select_codex_usage_limit(key_limits, "monthly")
+    )
+
+    return RateLimitStatusPayloadData(
+        plan_type="api_key",
+        rate_limit=_rate_limit_details(
+            _codex_usage_window_snapshot(primary_credit_limit),
+            _codex_usage_window_snapshot(secondary_credit_limit),
+        ),
+        credits=_codex_usage_credit_snapshot(primary_credit_limit, secondary_credit_limit),
+    )
+
+
+def _select_codex_usage_limit(
+    limits: list[V1UsageLimitResponse],
+    window: str,
+) -> V1UsageLimitResponse | None:
+    candidates = [
+        limit
+        for limit in limits
+        if limit.limit_window == window and limit.model_filter is None and limit.limit_type == "credits"
+    ]
+    return candidates[0] if candidates else None
+
+
+def _codex_usage_window_snapshot(limit: V1UsageLimitResponse | None) -> RateLimitWindowSnapshotData | None:
+    if limit is None or limit.max_value <= 0:
+        return None
+    reset_at = datetime.fromisoformat(limit.reset_at.replace("Z", "+00:00"))
+    reset_epoch = int(reset_at.timestamp())
+    now_epoch = int(time.time())
+    used_percent = max(0, min(100, int((limit.current_value / limit.max_value) * 100)))
+    window_seconds = {"5h": 18000, "daily": 86400, "7d": 604800, "weekly": 604800, "monthly": 2592000}.get(
+        limit.limit_window
+    )
+    return RateLimitWindowSnapshotData(
+        used_percent=used_percent,
+        limit_window_seconds=window_seconds,
+        reset_after_seconds=max(0, reset_epoch - now_epoch),
+        reset_at=reset_epoch,
+    )
+
+
+def _codex_usage_credit_snapshot(
+    primary_limit: V1UsageLimitResponse | None,
+    secondary_limit: V1UsageLimitResponse | None,
+) -> CreditStatusDetailsData | None:
+    preferred = secondary_limit or primary_limit
+    if preferred is None or preferred.limit_type != "credits":
+        return None
+    return CreditStatusDetailsData(
+        has_credits=preferred.remaining_value > 0,
+        unlimited=False,
+        balance=str(preferred.remaining_value),
+        approx_local_messages=None,
+        approx_cloud_messages=None,
     )
 
 
@@ -1184,63 +1263,14 @@ async def _transcribe_request(
 async def codex_usage(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-) -> Response:
-    admission, rejection = await _reject_or_acquire_http_proxy_endpoint_concurrency(request)
-    if rejection is not None:
-        return rejection
-    try:
-        payload = await context.service.get_rate_limit_payload()
-        return JSONResponse(content=RateLimitStatusPayload.from_data(payload).model_dump(mode="json"))
-    finally:
-        await _release_proxy_endpoint_concurrency_lease(admission)
-
-
-async def _acquire_proxy_endpoint_concurrency_lease(
-    path: str,
-) -> tuple[ProxyRequestFamily | None, ProxyEndpointConcurrencyLease | None]:
-    family = proxy_request_family_for_path(path)
-    if family is None:
-        return None, None
-
-    dashboard_settings = await get_settings_cache().get()
-    limits = proxy_endpoint_concurrency_limits_from_mapping(dashboard_settings.proxy_endpoint_concurrency_limits)
-    lease = await get_proxy_endpoint_concurrency_limiter().try_acquire(family, limit=limits[family])
-    return family, lease
-
-
-async def _reject_or_acquire_http_proxy_endpoint_concurrency(
-    request: Request,
-) -> tuple[ProxyEndpointConcurrencyLease | None, JSONResponse | None]:
-    family, lease = await _acquire_proxy_endpoint_concurrency_lease(request.url.path)
-    if family is None or lease is not None:
-        return lease, None
-
-    record_proxy_endpoint_concurrency_rejection(
-        family=family,
-        transport="http",
-        method=request.method,
-        path=request.url.path,
+    api_key: ApiKeyData | None = Depends(validate_codex_usage_identity),
+) -> RateLimitStatusPayload:
+    payload = (
+        await _build_codex_usage_payload_for_api_key(api_key)
+        if api_key is not None
+        else await context.service.get_rate_limit_payload()
     )
-    return None, build_proxy_endpoint_concurrency_error_response(request, family=family)
-
-
-async def _release_proxy_endpoint_concurrency_after_stream(
-    stream: AsyncIterator[str],
-    admission: ProxyEndpointConcurrencyLease | None,
-) -> AsyncIterator[str]:
-    try:
-        async for line in stream:
-            yield line
-    finally:
-        await _release_proxy_endpoint_concurrency_lease(admission)
-
-
-async def _release_proxy_endpoint_concurrency_lease(
-    admission: ProxyEndpointConcurrencyLease | None,
-) -> None:
-    if admission is None:
-        return
-    await admission.release()
+    return RateLimitStatusPayload.from_data(payload)
 
 
 async def _prepend_first(first: str | None, stream: AsyncIterator[str]) -> AsyncIterator[str]:
@@ -1262,6 +1292,9 @@ def _logged_error_json_response(
     headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
     code, message = _error_details_from_content(content)
+    effective_headers = dict(headers or {})
+    if status_code == 429 and is_local_overload_error_code(code):
+        effective_headers = merge_retry_after_headers(effective_headers)
     log_error_response(
         logger,
         request,
@@ -1270,7 +1303,7 @@ def _logged_error_json_response(
         message,
         category="proxy_error_response",
     )
-    return JSONResponse(status_code=status_code, content=content, headers=headers)
+    return JSONResponse(status_code=status_code, content=content, headers=effective_headers or None)
 
 
 def _error_details_from_content(

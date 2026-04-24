@@ -1,27 +1,26 @@
-# Database Backends
+# database-backends Specification
 
 ## Purpose
 
-Define supported database backends and default backend behavior for codex-lb persistence.
+See context docs for background.
 
 ## Requirements
 
-### Requirement: SQLite remains the default backend
-The service MUST default `CODEX_LB_DATABASE_URL` to a SQLite DSN when no explicit database URL is provided.
+### Requirement: Helm external PostgreSQL wiring resolves a non-empty database URL
 
-#### Scenario: No database URL configured
-- **WHEN** the service starts without `CODEX_LB_DATABASE_URL`
-- **THEN** it initializes and runs against the default SQLite database path
+When the Helm chart deploys with `postgresql.enabled=false`, it MUST provide a non-empty `CODEX_LB_DATABASE_URL` to the workload from one of the supported external database inputs. The chart MUST accept a direct `externalDatabase.url`, and it MUST also support reading `database-url` from an operator-provided external database secret reference without requiring the application encryption-key secret to be the same object.
 
-### Requirement: PostgreSQL is supported as an optional backend
-The service MUST accept a PostgreSQL SQLAlchemy async DSN (`postgresql+asyncpg://...`) via `CODEX_LB_DATABASE_URL` and initialize SQLAlchemy session/engine wiring without requiring SQLite-specific paths.
+#### Scenario: Direct external database URL is used
 
-#### Scenario: PostgreSQL URL configured
-- **WHEN** `CODEX_LB_DATABASE_URL` is set to `postgresql+asyncpg://...`
-- **THEN** service startup uses PostgreSQL for ORM operations and migration execution
+- **WHEN** `postgresql.enabled=false`
+- **AND** `externalDatabase.url` is non-empty
+- **THEN** the rendered workload uses that value for `CODEX_LB_DATABASE_URL`
 
-### Requirement: SQLite startup validation mode is configurable
-The service MUST support configurable startup validation for SQLite file databases via `CODEX_LB_DATABASE_SQLITE_STARTUP_CHECK_MODE`.
+#### Scenario: External database URL comes from a dedicated secret reference
+
+- **WHEN** `postgresql.enabled=false`
+- **AND** `externalDatabase.existingSecret` is set
+- **THEN** the rendered workload reads `database-url` from that secret for `CODEX_LB_DATABASE_URL`
 
 #### Scenario: Default SQLite startup uses quick validation
 - **GIVEN** the configured database URL is a SQLite file
@@ -90,3 +89,4 @@ The tool MUST skip transient runtime tables whose contents can be rebuilt after 
 - **THEN** mutable state tables are synchronized to the latest SQLite contents
 - **AND** history tables append only rows created after the earlier full copy
 - **AND** transient runtime tables remain excluded from the sync
+

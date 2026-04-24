@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import socket
+from collections.abc import Mapping
 from functools import lru_cache
 from ipaddress import ip_address, ip_network
 from pathlib import Path
@@ -49,7 +50,7 @@ type OptionalStringInput = str | None
 type ModelContextWindowOverridesInput = str | dict[str, int] | None
 
 
-def _validate_context_window_entries(data: dict) -> dict[str, int]:
+def _validate_context_window_entries(data: Mapping[str, object]) -> dict[str, int]:
     result: dict[str, int] = {}
     for k, v in data.items():
         if isinstance(v, bool):
@@ -83,6 +84,31 @@ def _configured_http_port() -> int:
     return 2455
 
 
+def _normalize_cidr_list(value: StringListInput, *, field_name: str, invalid_label: str) -> list[str]:
+    if value is None:
+        return []
+
+    cidrs: list[str] = []
+    if isinstance(value, str):
+        entries = [entry.strip() for entry in value.split(",")]
+        cidrs = [entry for entry in entries if entry]
+    elif isinstance(value, list):
+        for entry in value:
+            if isinstance(entry, str):
+                cidr = entry.strip()
+                if cidr:
+                    cidrs.append(cidr)
+    else:
+        raise TypeError(f"{field_name} must be a list or comma-separated string")
+
+    for cidr in cidrs:
+        try:
+            ip_network(cidr, strict=False)
+        except ValueError as exc:
+            raise ValueError(f"Invalid {invalid_label}: {cidr}") from exc
+    return cidrs
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CODEX_LB_",
@@ -108,7 +134,12 @@ class Settings(BaseSettings):
     proxy_request_budget_seconds: float = Field(default=600.0, gt=0)
     compact_request_budget_seconds: float = Field(default=75.0, gt=0)
     stream_idle_timeout_seconds: float = 300.0
-    max_sse_event_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
+    proxy_downstream_websocket_idle_timeout_seconds: float = Field(default=120.0, gt=0)
+    # Applies to both upstream SSE event buffering and upstream websocket message
+    # frames. Keep the default aligned with the common 16 MiB websocket ceiling so
+    # large built-in tool payloads (for example image_generation outputs) do not
+    # fail locally with a 1009 before upstream completion.
+    max_sse_event_bytes: int = Field(default=16 * 1024 * 1024, gt=0)
     auth_base_url: str = "https://auth.openai.com"
     oauth_client_id: str = "app_EMoamEEZ73f0CkXaXp7hrann"
     oauth_originator: str = "codex_chatgpt_desktop"
@@ -153,6 +184,7 @@ class Settings(BaseSettings):
     model_registry_refresh_interval_seconds: int = Field(default=300, gt=0)
     model_registry_client_version: str = "0.101.0"
     model_context_window_overrides: Annotated[dict[str, int], NoDecode] = Field(default_factory=dict)
+    proxy_unauthenticated_client_cidrs: Annotated[list[str], NoDecode] = Field(default_factory=list)
     firewall_trust_proxy_headers: bool = False
     firewall_trusted_proxy_cidrs: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["127.0.0.1/32", "::1/128"]
@@ -190,9 +222,19 @@ class Settings(BaseSettings):
     # Backpressure
     backpressure_max_concurrent_requests: int = 0  # 0 = unlimited
 
-    bulkhead_proxy_limit: int = 200
-    bulkhead_dashboard_limit: int = 50
+    bulkhead_proxy_limit: int = Field(default=512, ge=0)
+    bulkhead_proxy_http_limit: int | None = Field(default=None, ge=0)
+    bulkhead_proxy_websocket_limit: int | None = Field(default=None, ge=0)
+    bulkhead_proxy_compact_limit: int | None = Field(default=None, ge=0)
+    bulkhead_dashboard_limit: int = Field(default=50, ge=0)
     dashboard_bootstrap_token: str | None = None
+    proxy_token_refresh_limit: int = Field(default=64, ge=0)
+    proxy_upstream_websocket_connect_limit: int = Field(default=128, ge=0)
+    proxy_response_create_limit: int = Field(default=256, ge=0)
+    proxy_compact_response_create_limit: int = Field(default=64, ge=0)
+    proxy_admission_wait_timeout_seconds: float = Field(default=10.0, gt=0)
+    proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
+    usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
 
     memory_warning_threshold_mb: int = 0
     memory_reject_threshold_mb: int = 0
@@ -285,27 +327,20 @@ class Settings(BaseSettings):
     @field_validator("firewall_trusted_proxy_cidrs", mode="before")
     @classmethod
     def _normalize_firewall_trusted_proxy_cidrs(cls, value: StringListInput) -> list[str]:
-        if value is None:
-            return []
-        cidrs: list[str] = []
-        if isinstance(value, str):
-            entries = [entry.strip() for entry in value.split(",")]
-            cidrs = [entry for entry in entries if entry]
-        elif isinstance(value, list):
-            for entry in value:
-                if isinstance(entry, str):
-                    cidr = entry.strip()
-                    if cidr:
-                        cidrs.append(cidr)
-        else:
-            raise TypeError("firewall_trusted_proxy_cidrs must be a list or comma-separated string")
+        return _normalize_cidr_list(
+            value,
+            field_name="firewall_trusted_proxy_cidrs",
+            invalid_label="firewall trusted proxy CIDR",
+        )
 
-        for cidr in cidrs:
-            try:
-                ip_network(cidr, strict=False)
-            except ValueError as exc:
-                raise ValueError(f"Invalid firewall trusted proxy CIDR: {cidr}") from exc
-        return cidrs
+    @field_validator("proxy_unauthenticated_client_cidrs", mode="before")
+    @classmethod
+    def _normalize_proxy_unauthenticated_client_cidrs(cls, value: StringListInput) -> list[str]:
+        return _normalize_cidr_list(
+            value,
+            field_name="proxy_unauthenticated_client_cidrs",
+            invalid_label="proxy unauthenticated client CIDR",
+        )
 
     @field_validator("dashboard_auth_proxy_header", mode="before")
     @classmethod
@@ -389,6 +424,17 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "http_responses_session_bridge_advertise_base_url must be replica-specific for bridge routing"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _normalize_bulkhead_limits(self) -> "Settings":
+        if self.bulkhead_proxy_http_limit is None:
+            self.bulkhead_proxy_http_limit = self.bulkhead_proxy_limit
+        if self.bulkhead_proxy_websocket_limit is None:
+            self.bulkhead_proxy_websocket_limit = self.bulkhead_proxy_limit
+        if self.bulkhead_proxy_compact_limit is None:
+            http_limit = self.bulkhead_proxy_http_limit
+            self.bulkhead_proxy_compact_limit = 0 if http_limit <= 0 else min(http_limit, 16)
         return self
 
     @model_validator(mode="after")

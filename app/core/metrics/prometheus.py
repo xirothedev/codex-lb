@@ -202,6 +202,18 @@ if PROMETHEUS_AVAILABLE:
         registry=REGISTRY,
         **_gauge_kwargs,
     )
+    continuity_owner_resolution_total = Counter(
+        "codex_lb_continuity_owner_resolution_total",
+        "Total continuity owner resolution outcomes by surface and source",
+        ["surface", "source", "outcome"],
+        registry=REGISTRY,
+    )
+    continuity_fail_closed_total = Counter(
+        "codex_lb_continuity_fail_closed_total",
+        "Total continuity fail-closed or masked retryable outcomes by surface and reason",
+        ["surface", "reason"],
+        registry=REGISTRY,
+    )
 
     def make_scrape_registry() -> CollectorRegistryLike:
         if MULTIPROCESS_MODE:
@@ -247,6 +259,8 @@ else:
     client_exposed_errors_total: CounterLike | None = None
     proxy_endpoint_concurrency_rejections_total: CounterLike | None = None
     proxy_endpoint_concurrency_in_flight: GaugeLike | None = None
+    continuity_owner_resolution_total: CounterLike | None = None
+    continuity_fail_closed_total: CounterLike | None = None
 
     def make_scrape_registry() -> None:
         return None
@@ -278,6 +292,8 @@ __all__ = [
     "bridge_soft_local_rebind_total",
     "circuit_breaker_state",
     "client_exposed_errors_total",
+    "continuity_fail_closed_total",
+    "continuity_owner_resolution_total",
     "drain_transitions_total",
     "failover_total",
     "make_scrape_registry",

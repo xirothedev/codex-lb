@@ -131,6 +131,10 @@ def test_prometheus_metrics_defined_when_dependency_available(monkeypatch: pytes
     assert prometheus_module.drain_transitions_total.labelnames == ("from_tier", "to_tier")
     assert prometheus_module.client_exposed_errors_total.name == "codex_lb_client_exposed_errors_total"
     assert prometheus_module.client_exposed_errors_total.labelnames == ("transport", "failure_class")
+    assert prometheus_module.continuity_owner_resolution_total.name == "codex_lb_continuity_owner_resolution_total"
+    assert prometheus_module.continuity_owner_resolution_total.labelnames == ("surface", "source", "outcome")
+    assert prometheus_module.continuity_fail_closed_total.name == "codex_lb_continuity_fail_closed_total"
+    assert prometheus_module.continuity_fail_closed_total.labelnames == ("surface", "reason")
 
 
 @pytest.mark.asyncio

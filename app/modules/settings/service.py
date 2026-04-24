@@ -1,43 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 
 from app.db.models import DashboardSettings
-from app.modules.proxy.request_admission import proxy_endpoint_concurrency_limits_from_mapping
 from app.modules.settings.repository import SettingsRepository
-
-
-@dataclass(frozen=True, slots=True)
-class ProxyEndpointConcurrencyLimitsData:
-    responses: int
-    responses_compact: int
-    chat_completions: int
-    transcriptions: int
-    models: int
-    usage: int
-
-    @classmethod
-    def from_mapping(cls, raw: Mapping[str, object] | None) -> "ProxyEndpointConcurrencyLimitsData":
-        normalized = proxy_endpoint_concurrency_limits_from_mapping(raw)
-        return cls(
-            responses=normalized["responses"],
-            responses_compact=normalized["responses_compact"],
-            chat_completions=normalized["chat_completions"],
-            transcriptions=normalized["transcriptions"],
-            models=normalized["models"],
-            usage=normalized["usage"],
-        )
-
-    def to_mapping(self) -> dict[str, int]:
-        return {
-            "responses": self.responses,
-            "responses_compact": self.responses_compact,
-            "chat_completions": self.chat_completions,
-            "transcriptions": self.transcriptions,
-            "models": self.models,
-            "usage": self.usage,
-        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +13,6 @@ class DashboardSettingsData:
     prefer_earlier_reset_accounts: bool
     routing_strategy: str
     openai_cache_affinity_max_age_seconds: int
-    proxy_endpoint_concurrency_limits: ProxyEndpointConcurrencyLimitsData
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float
@@ -64,7 +29,6 @@ class DashboardSettingsUpdateData:
     prefer_earlier_reset_accounts: bool
     routing_strategy: str
     openai_cache_affinity_max_age_seconds: int
-    proxy_endpoint_concurrency_limits: ProxyEndpointConcurrencyLimitsData
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float
@@ -91,7 +55,6 @@ class SettingsService:
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
             routing_strategy=payload.routing_strategy,
             openai_cache_affinity_max_age_seconds=payload.openai_cache_affinity_max_age_seconds,
-            proxy_endpoint_concurrency_limits=payload.proxy_endpoint_concurrency_limits.to_mapping(),
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
                 payload.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
             ),
@@ -110,9 +73,6 @@ class SettingsService:
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             routing_strategy=row.routing_strategy,
             openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
-            proxy_endpoint_concurrency_limits=ProxyEndpointConcurrencyLimitsData.from_mapping(
-                row.proxy_endpoint_concurrency_limits
-            ),
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
                 row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
             ),

@@ -10,7 +10,6 @@ export function buildSettingsUpdateRequest(
     preferEarlierResetAccounts: settings.preferEarlierResetAccounts,
     routingStrategy: settings.routingStrategy,
     openaiCacheAffinityMaxAgeSeconds: settings.openaiCacheAffinityMaxAgeSeconds,
-    proxyEndpointConcurrencyLimits: settings.proxyEndpointConcurrencyLimits,
     importWithoutOverwrite: settings.importWithoutOverwrite,
     totpRequiredOnLogin: settings.totpRequiredOnLogin,
     apiKeyAuthEnabled: settings.apiKeyAuthEnabled,

@@ -22,14 +22,6 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is False
-    assert payload["proxyEndpointConcurrencyLimits"] == {
-        "responses": 0,
-        "responses_compact": 0,
-        "chat_completions": 0,
-        "transcriptions": 0,
-        "models": 0,
-        "usage": 0,
-    }
 
     response = await async_client.put(
         "/api/settings",
@@ -45,14 +37,6 @@ async def test_settings_api_get_and_update(async_client):
             "importWithoutOverwrite": False,
             "totpRequiredOnLogin": False,
             "apiKeyAuthEnabled": True,
-            "proxyEndpointConcurrencyLimits": {
-                "responses": 1,
-                "responses_compact": 2,
-                "chat_completions": 3,
-                "transcriptions": 4,
-                "models": 5,
-                "usage": 6,
-            },
         },
     )
     assert response.status_code == 200
@@ -69,14 +53,6 @@ async def test_settings_api_get_and_update(async_client):
     assert updated["totpRequiredOnLogin"] is False
     assert updated["totpConfigured"] is False
     assert updated["apiKeyAuthEnabled"] is True
-    assert updated["proxyEndpointConcurrencyLimits"] == {
-        "responses": 1,
-        "responses_compact": 2,
-        "chat_completions": 3,
-        "transcriptions": 4,
-        "models": 5,
-        "usage": 6,
-    }
 
     response = await async_client.get("/api/settings")
     assert response.status_code == 200
@@ -93,32 +69,3 @@ async def test_settings_api_get_and_update(async_client):
     assert payload["totpRequiredOnLogin"] is False
     assert payload["totpConfigured"] is False
     assert payload["apiKeyAuthEnabled"] is True
-    assert payload["proxyEndpointConcurrencyLimits"] == {
-        "responses": 1,
-        "responses_compact": 2,
-        "chat_completions": 3,
-        "transcriptions": 4,
-        "models": 5,
-        "usage": 6,
-    }
-
-
-@pytest.mark.asyncio
-async def test_settings_api_rejects_invalid_proxy_endpoint_concurrency_limits(async_client):
-    response = await async_client.put(
-        "/api/settings",
-        json={
-            "stickyThreadsEnabled": True,
-            "preferEarlierResetAccounts": True,
-            "proxyEndpointConcurrencyLimits": {
-                "responses": -1,
-                "responses_compact": 0,
-                "chat_completions": 0,
-                "transcriptions": 0,
-                "models": 0,
-                "usage": 0,
-            },
-        },
-    )
-
-    assert response.status_code == 422

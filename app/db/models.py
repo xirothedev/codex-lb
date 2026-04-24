@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -13,7 +12,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    JSON,
     LargeBinary,
     String,
     Text,
@@ -30,24 +28,6 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
     pass
-
-
-_PROXY_ENDPOINT_CONCURRENCY_LIMITS_DEFAULT = {
-    "responses": 0,
-    "responses_compact": 0,
-    "chat_completions": 0,
-    "transcriptions": 0,
-    "models": 0,
-    "usage": 0,
-}
-_PROXY_ENDPOINT_CONCURRENCY_LIMITS_DEFAULT_JSON = json.dumps(
-    _PROXY_ENDPOINT_CONCURRENCY_LIMITS_DEFAULT,
-    separators=(",", ":"),
-)
-
-
-def _default_proxy_endpoint_concurrency_limits() -> dict[str, int]:
-    return dict(_PROXY_ENDPOINT_CONCURRENCY_LIMITS_DEFAULT)
 
 
 def _enum_values(enum_cls: type[Enum]) -> list[str]:
@@ -281,12 +261,6 @@ class DashboardSettings(Base):
         Float,
         default=95.0,
         server_default=text("95.0"),
-        nullable=False,
-    )
-    proxy_endpoint_concurrency_limits: Mapped[dict[str, int]] = mapped_column(
-        JSON,
-        default=_default_proxy_endpoint_concurrency_limits,
-        server_default=text(f"'{_PROXY_ENDPOINT_CONCURRENCY_LIMITS_DEFAULT_JSON}'"),
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

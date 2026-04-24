@@ -80,16 +80,6 @@ const SettingsPayloadSchema = z
 		preferEarlierResetAccounts: z.boolean().optional(),
 		routingStrategy: z.enum(["usage_weighted", "round_robin", "capacity_weighted"]).optional(),
 		openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
-		proxyEndpointConcurrencyLimits: z
-			.object({
-				responses: z.number().int().nonnegative(),
-				responses_compact: z.number().int().nonnegative(),
-				chat_completions: z.number().int().nonnegative(),
-				transcriptions: z.number().int().nonnegative(),
-				models: z.number().int().nonnegative(),
-				usage: z.number().int().nonnegative(),
-			})
-			.optional(),
 		importWithoutOverwrite: z.boolean().optional(),
 		totpRequiredOnLogin: z.boolean().optional(),
 		totpConfigured: z.boolean().optional(),

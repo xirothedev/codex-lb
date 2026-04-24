@@ -189,19 +189,6 @@ if PROMETHEUS_AVAILABLE:
         ["transport", "failure_class"],
         registry=REGISTRY,
     )
-    proxy_endpoint_concurrency_rejections_total = Counter(
-        "proxy_endpoint_concurrency_rejections_total",
-        "Total proxy endpoint concurrency rejections by family and transport",
-        ["family", "transport"],
-        registry=REGISTRY,
-    )
-    proxy_endpoint_concurrency_in_flight = Gauge(
-        "proxy_endpoint_concurrency_in_flight",
-        "In-flight proxy endpoint requests by family",
-        ["family"],
-        registry=REGISTRY,
-        **_gauge_kwargs,
-    )
     continuity_owner_resolution_total = Counter(
         "codex_lb_continuity_owner_resolution_total",
         "Total continuity owner resolution outcomes by surface and source",
@@ -257,8 +244,6 @@ else:
     failover_total: CounterLike | None = None
     drain_transitions_total: CounterLike | None = None
     client_exposed_errors_total: CounterLike | None = None
-    proxy_endpoint_concurrency_rejections_total: CounterLike | None = None
-    proxy_endpoint_concurrency_in_flight: GaugeLike | None = None
     continuity_owner_resolution_total: CounterLike | None = None
     continuity_fail_closed_total: CounterLike | None = None
 
@@ -287,8 +272,6 @@ __all__ = [
     "bridge_prompt_cache_locality_miss_total",
     "bridge_reattach_total",
     "bridge_same_account_takeover_total",
-    "proxy_endpoint_concurrency_in_flight",
-    "proxy_endpoint_concurrency_rejections_total",
     "bridge_soft_local_rebind_total",
     "circuit_breaker_state",
     "client_exposed_errors_total",

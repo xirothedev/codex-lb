@@ -2,7 +2,7 @@
 set -eu
 
 if [ "${CODEX_LB_DATABASE_MIGRATE_ON_STARTUP:-true}" = "true" ]; then
-  python -m app.db.migrate upgrade
+  python -m app.db.migrate upgrade heads
 fi
 
 # Disable app-level startup migration so app/db/session.py init_db() does not

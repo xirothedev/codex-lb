@@ -89,8 +89,8 @@ _IMAGE_INLINE_MAX_BYTES = 8 * 1024 * 1024
 _IMAGE_INLINE_CHUNK_SIZE = 64 * 1024
 _IMAGE_INLINE_TIMEOUT_SECONDS = 8.0
 _BLOCKED_LITERAL_HOSTS = {"localhost", "localhost.localdomain"}
-_UPSTREAM_RESPONSE_CREATE_WARN_BYTES = 12 * 1024 * 1024
-_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = 15 * 1024 * 1024
+_UPSTREAM_RESPONSE_CREATE_MAX_BYTES = get_settings().upstream_response_create_max_bytes
+_UPSTREAM_RESPONSE_CREATE_WARN_BYTES = int(_UPSTREAM_RESPONSE_CREATE_MAX_BYTES * 0.8)
 _RESPONSE_CREATE_TOOL_OUTPUT_OMISSION_NOTICE = (
     "[codex-lb omitted historical tool output ({bytes} bytes) to fit upstream websocket budget]"
 )
@@ -1322,7 +1322,7 @@ def _prepare_websocket_response_create_payload(payload_dict: JsonObject) -> Json
             max_bytes=_UPSTREAM_RESPONSE_CREATE_MAX_BYTES,
         )
         if slim_summary is not None:
-            request_payload = cast(JsonObject, slimmed_payload)
+            request_payload = slimmed_payload
             slimmed_text = json.dumps(request_payload, ensure_ascii=True, separators=(",", ":"))
             logger.warning(
                 (

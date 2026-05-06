@@ -13,6 +13,7 @@ class DashboardSettingsData:
     prefer_earlier_reset_accounts: bool
     routing_strategy: str
     openai_cache_affinity_max_age_seconds: int
+    dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float
@@ -29,6 +30,7 @@ class DashboardSettingsUpdateData:
     prefer_earlier_reset_accounts: bool
     routing_strategy: str
     openai_cache_affinity_max_age_seconds: int
+    dashboard_session_ttl_seconds: int
     http_responses_session_bridge_prompt_cache_idle_ttl_seconds: int
     http_responses_session_bridge_gateway_safe_mode: bool
     sticky_reallocation_budget_threshold_pct: float
@@ -55,6 +57,7 @@ class SettingsService:
             prefer_earlier_reset_accounts=payload.prefer_earlier_reset_accounts,
             routing_strategy=payload.routing_strategy,
             openai_cache_affinity_max_age_seconds=payload.openai_cache_affinity_max_age_seconds,
+            dashboard_session_ttl_seconds=payload.dashboard_session_ttl_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
                 payload.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
             ),
@@ -73,6 +76,7 @@ class SettingsService:
             prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
             routing_strategy=row.routing_strategy,
             openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
+            dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
             http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
                 row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
             ),

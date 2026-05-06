@@ -13,6 +13,10 @@ on:
         description: "Comma-separated target platforms"
         required: false
         default: "linux/amd64"
+      no_cache:
+        description: "Disable build cache"
+        required: false
+        default: "false"
 
 concurrency:
   group: ${{ github.workflow }}-${{ inputs.ref }}
@@ -88,6 +92,7 @@ jobs:
             ghcr.io/${{ github.repository }}:${{ steps.image.outputs.sha_tag }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          no-cache: ${{ inputs.no_cache == 'true' }}
 
       - name: Summarize image
         run: |

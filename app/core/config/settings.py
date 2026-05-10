@@ -266,43 +266,6 @@ class Settings(BaseSettings):
     http_connector_limit: int = 100
     http_connector_limit_per_host: int = 50
 
-    # --- Multi-replica & production settings ---
-    # Prometheus metrics
-    metrics_enabled: bool = False
-    metrics_port: int = 9090
-
-    # Logging
-    log_format: str = "text"  # "text" or "json"
-
-    # Leader election
-    leader_election_enabled: bool = False
-    leader_election_ttl_seconds: int = 600
-
-    # Circuit breaker
-    circuit_breaker_enabled: bool = False
-    circuit_breaker_failure_threshold: int = 5
-    circuit_breaker_recovery_timeout_seconds: int = 60
-
-    # Backpressure
-    backpressure_max_concurrent_requests: int = 0  # 0 = unlimited
-
-    bulkhead_proxy_limit: int = 200
-    bulkhead_dashboard_limit: int = 50
-
-    memory_warning_threshold_mb: int = 0
-    memory_reject_threshold_mb: int = 0
-
-    # OpenTelemetry
-    otel_enabled: bool = False
-    otel_exporter_endpoint: str = ""
-
-    # Shutdown drain
-    shutdown_drain_timeout_seconds: int = 30
-
-    # HTTP connector limits
-    http_connector_limit: int = 100
-    http_connector_limit_per_host: int = 50
-
     @field_validator("database_url")
     @classmethod
     def _expand_database_url(cls, value: str) -> str:
@@ -468,12 +431,6 @@ class Settings(BaseSettings):
             raise ValueError("dashboard_auth_mode=trusted_header requires firewall_trust_proxy_headers=true")
         if not self.firewall_trusted_proxy_cidrs:
             raise ValueError("dashboard_auth_mode=trusted_header requires non-empty firewall_trusted_proxy_cidrs")
-        return self
-
-    @model_validator(mode="after")
-    def _validate_metrics_port(self) -> "Settings":
-        if self.metrics_port == 2455:
-            raise ValueError("metrics_port must not be 2455 (main application port)")
         return self
 
 

@@ -833,7 +833,7 @@ async def test_update_key_renews_same_raw_key_and_resets_limit_usage() -> None:
     updated = await service.update_key(
         created.id,
         ApiKeyUpdateData(
-            expires_at=datetime(2026, 5, 1, 0, 0, 0, tzinfo=timezone.utc),
+            expires_at=datetime(2099, 1, 1, 0, 0, 0, tzinfo=timezone.utc),
             expires_at_set=True,
             reset_usage=True,
         ),
@@ -850,7 +850,7 @@ async def test_update_key_renews_same_raw_key_and_resets_limit_usage() -> None:
     assert stored.key_hash == old_hash
     assert refreshed_limits[0].current_value == 0
     assert refreshed_limits[0].reset_at > old_reset_at
-    assert updated.expires_at == datetime(2026, 5, 1, 0, 0, 0)
+    assert updated.expires_at == datetime(2099, 1, 1, 0, 0, 0)
 
 
 @pytest.mark.asyncio

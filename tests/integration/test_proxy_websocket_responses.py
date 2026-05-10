@@ -844,6 +844,103 @@ def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instanc
     ]
 
 
+def test_backend_responses_websocket_accepts_canonical_response_create_envelope(app_instance, monkeypatch):
+    upstream_messages = [
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {"type": "response.created", "response": {"id": "resp_ws_backend_image", "status": "in_progress"}},
+                separators=(",", ":"),
+            ),
+        ),
+        _FakeUpstreamMessage(
+            "text",
+            text=json.dumps(
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_ws_backend_image",
+                        "status": "completed",
+                        "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+                    },
+                },
+                separators=(",", ":"),
+            ),
+        ),
+    ]
+    fake_upstream = _FakeUpstreamWebSocket(upstream_messages)
+
+    class _FakeSettingsCache:
+        async def get(self):
+            return _websocket_settings()
+
+    async def allow_firewall(_websocket):
+        return None
+
+    async def allow_proxy_api_key(_authorization: str | None):
+        return None
+
+    async def fake_connect_proxy_websocket(
+        self,
+        headers,
+        *,
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset,
+        routing_strategy,
+        model,
+        request_state,
+        api_key,
+        client_send_lock,
+        websocket,
+    ):
+        del self, headers, sticky_key, sticky_kind, reallocate_sticky, sticky_max_age_seconds
+        del prefer_earlier_reset, routing_strategy, request_state, api_key, client_send_lock, websocket
+        assert model == "gpt-5.3-codex"
+        return SimpleNamespace(id="acct_ws_backend_image"), fake_upstream
+
+    monkeypatch.setattr(proxy_api_module, "_websocket_firewall_denial_response", allow_firewall)
+    monkeypatch.setattr(proxy_api_module, "validate_proxy_api_key_authorization", allow_proxy_api_key)
+    monkeypatch.setattr(proxy_module, "get_settings_cache", lambda: _FakeSettingsCache())
+    monkeypatch.setattr(proxy_module.ProxyService, "_connect_proxy_websocket", fake_connect_proxy_websocket)
+
+    request_payload = {
+        "type": "response.create",
+        "client_metadata": {"origin": "test"},
+        "response": {
+            "model": "gpt-5.3-codex",
+            "instructions": "draw",
+            "input": "draw a red square",
+            "tools": [{"type": "image_generation"}],
+            "tool_choice": {"type": "image_generation"},
+        },
+    }
+
+    with TestClient(app_instance) as client:
+        with client.websocket_connect("/backend-api/codex/responses") as websocket:
+            websocket.send_text(json.dumps(request_payload))
+            first = json.loads(websocket.receive_text())
+            second = json.loads(websocket.receive_text())
+
+    assert first["type"] == "response.created"
+    assert second["type"] == "response.completed"
+    assert [json.loads(message) for message in fake_upstream.sent_text] == [
+        {
+            "type": "response.create",
+            "model": "gpt-5.3-codex",
+            "instructions": "draw",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "draw a red square"}]}],
+            "tools": [{"type": "image_generation"}],
+            "tool_choice": {"type": "image_generation"},
+            "store": False,
+            "include": [],
+            "client_metadata": {"origin": "test"},
+        }
+    ]
+
+
 def test_v1_responses_websocket_rejects_invalid_payload_before_connect(app_instance, monkeypatch):
     called = {"connect": False}
 

@@ -68,39 +68,6 @@ from app.modules.viewer_portal import api as viewer_portal_api
 logger = logging.getLogger(__name__)
 
 
-def _is_benign_metrics_bind_failure(exc: BaseException) -> bool:
-    if not MULTIPROCESS_MODE:
-        return False
-    if isinstance(exc, SystemExit):
-        return exc.code == 1
-    if isinstance(exc, OSError):
-        import errno as _errno
-
-        return exc.errno in (_errno.EADDRINUSE, _errno.EADDRNOTAVAIL)
-    return False
-
-
-class InFlightMiddleware:
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        # Graceful drain waits for finite HTTP request lifetimes only. Long-lived
-        # websocket sessions are handled independently and must not pin drain.
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        shutdown_state = import_module("app.core.shutdown")
-        shutdown_state.increment_in_flight()
-        try:
-            await self.app(scope, receive, send)
-        finally:
-            shutdown_state.decrement_in_flight()
-
-logger = logging.getLogger(__name__)
-
-
 class _MetricsServer(Protocol):
     should_exit: bool
 

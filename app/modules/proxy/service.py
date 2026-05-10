@@ -2795,7 +2795,11 @@ class ProxyService:
     ) -> _PreparedWebSocketRequest:
         refreshed_api_key = await self._refresh_websocket_api_key_policy(api_key)
         client_metadata = _response_create_client_metadata(payload, headers=headers)
-        responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
+        normalized_request_payload = _response_create_request_payload(payload)
+        responses_payload = normalize_responses_request_payload(
+            normalized_request_payload,
+            openai_compat=openai_cache_affinity,
+        )
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
         validate_model_access(refreshed_api_key, responses_payload.model)
         self._raise_for_unsupported_input_image_references(responses_payload)
@@ -10261,6 +10265,13 @@ def _response_create_client_metadata(
         client_metadata.setdefault("x-codex-turn-metadata", turn_metadata)
 
     return client_metadata or None
+
+
+def _response_create_request_payload(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    response = payload.get("response")
+    if is_json_mapping(response):
+        return dict(response)
+    return dict(payload)
 
 
 def _headers_with_turn_state(headers: Mapping[str, str], turn_state: str | None) -> dict[str, str]:

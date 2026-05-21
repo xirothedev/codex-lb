@@ -32,7 +32,6 @@ from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers
 from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
 from app.core.usage.quota import apply_usage_quota
-from app.core.usage.types import UsageWindowRow
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
 from app.modules.accounts.runtime_health import pause_account
@@ -40,6 +39,7 @@ from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.usage.additional_quota_keys import canonicalize_additional_quota_key
+from app.modules.usage.mappers import usage_history_to_window_row
 
 if TYPE_CHECKING:
     from app.modules.accounts.repository import AccountsRepository
@@ -698,14 +698,19 @@ class LoadBalancer:
         if existing:
             pinned = next((state for state in states if state.account_id == existing), None)
             if pinned is not None:
-                # Proactively rebind session affinity for prompt-cache and
-                # codex sessions once the pinned account is already above the
-                # configured budget threshold. That preserves continuity below
-                # the threshold while avoiding obvious short-window failures
-                # once the session is skating on the edge of exhaustion.
+                # Proactively rebind session affinity for any sticky kind
+                # once the pinned account is already above the configured
+                # budget threshold. That preserves continuity below the
+                # threshold while avoiding obvious short-window failures once
+                # the session is skating on the edge of exhaustion.
                 now = time.time()
                 budget_pressured = (
-                    sticky_kind in (StickySessionKind.PROMPT_CACHE, StickySessionKind.CODEX_SESSION)
+                    sticky_kind
+                    in (
+                        StickySessionKind.PROMPT_CACHE,
+                        StickySessionKind.CODEX_SESSION,
+                        StickySessionKind.STICKY_THREAD,
+                    )
                     and pinned.status != AccountStatus.RATE_LIMITED
                     and _state_above_sticky_budget_threshold(pinned, budget_threshold_pct)
                 )
@@ -1077,8 +1082,8 @@ def _state_from_account(
     primary_reset = primary_entry.reset_at if primary_entry else None
     primary_window_minutes = primary_entry.window_minutes if primary_entry else None
     effective_secondary_entry = secondary_entry
-    primary_row = _usage_entry_to_window_row(primary_entry) if primary_entry is not None else None
-    secondary_row = _usage_entry_to_window_row(secondary_entry) if secondary_entry is not None else None
+    primary_row = usage_history_to_window_row(primary_entry) if primary_entry is not None else None
+    secondary_row = usage_history_to_window_row(secondary_entry) if secondary_entry is not None else None
     # Weekly-only accounts may not emit a dedicated secondary row; treat the
     # weekly primary row as quota-window input for balancer decisions. When
     # both rows exist, prefer the newer weekly snapshot.
@@ -1267,16 +1272,6 @@ def _mapped_model_has_registry_entry(model: str | None) -> bool:
     if not isinstance(model_plans, dict):
         return False
     return model.strip().lower() in model_plans
-
-
-def _usage_entry_to_window_row(entry: UsageHistory) -> UsageWindowRow:
-    return UsageWindowRow(
-        account_id=entry.account_id,
-        used_percent=entry.used_percent,
-        reset_at=entry.reset_at,
-        window_minutes=entry.window_minutes,
-        recorded_at=entry.recorded_at,
-    )
 
 
 def _clone_account(account: Account) -> Account:

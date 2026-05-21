@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+from typing import cast
 
 import pytest
 
@@ -94,7 +95,8 @@ async def test_backend_files_create_defaults_use_case_to_codex(async_client, mon
     )
 
     assert response.status_code == 200
-    assert captured["payload"]["use_case"] == "codex"  # type: ignore[index]
+    captured_payload = cast(dict[str, object], captured["payload"])
+    assert captured_payload["use_case"] == "codex"
 
 
 @pytest.mark.asyncio
@@ -489,7 +491,7 @@ async def test_synthesized_turn_state_does_not_block_file_id_pin(async_client):
 
     from app.core.openai.requests import ResponsesRequest
     from app.dependencies import get_proxy_service_for_app
-    from app.modules.proxy.service import ensure_downstream_turn_state
+    from app.modules.proxy.affinity import ensure_downstream_turn_state
 
     service = get_proxy_service_for_app(async_client._transport.app)
     await service._pin_file_account("file_synth_ts", "acc_ts_a")

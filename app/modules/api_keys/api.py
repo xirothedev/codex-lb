@@ -7,6 +7,7 @@ from app.core.auth.dependencies import set_dashboard_error_format, validate_dash
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
 from app.dependencies import ApiKeysContext, get_api_keys_context
 from app.modules.api_keys.schemas import (
+    ApiKeyAccountCostResponse,
     ApiKeyCreateRequest,
     ApiKeyCreateResponse,
     ApiKeyResponse,
@@ -22,6 +23,7 @@ from app.modules.api_keys.service import (
     ApiKeyNotFoundError,
     ApiKeyUpdateData,
     ApiKeyUsageInFlightError,
+    ApiKeyValidationError,
     LimitRuleInput,
 )
 
@@ -38,6 +40,7 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         name=row.name,
         key_prefix=row.key_prefix,
         allowed_models=row.allowed_models,
+        apply_to_codex_model=row.apply_to_codex_model,
         enforced_model=row.enforced_model,
         enforced_reasoning_effort=row.enforced_reasoning_effort,
         enforced_service_tier=row.enforced_service_tier,
@@ -115,6 +118,7 @@ async def create_api_key(
             ApiKeyCreateData(
                 name=payload.name,
                 allowed_models=payload.allowed_models,
+                apply_to_codex_model=payload.apply_to_codex_model,
                 enforced_model=payload.enforced_model,
                 enforced_reasoning_effort=payload.enforced_reasoning_effort,
                 enforced_service_tier=payload.enforced_service_tier,
@@ -123,7 +127,7 @@ async def create_api_key(
                 limits=limit_inputs,
             )
         )
-    except ValueError as exc:
+    except ApiKeyValidationError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
     resp = _to_response(created)
     AuditService.log_async(
@@ -168,6 +172,8 @@ async def update_api_key(
         name_set="name" in fields,
         allowed_models=payload.allowed_models,
         allowed_models_set="allowed_models" in fields,
+        apply_to_codex_model=payload.apply_to_codex_model,
+        apply_to_codex_model_set="apply_to_codex_model" in fields,
         enforced_model=payload.enforced_model,
         enforced_model_set="enforced_model" in fields,
         enforced_reasoning_effort=payload.enforced_reasoning_effort,
@@ -190,7 +196,7 @@ async def update_api_key(
         raise DashboardNotFoundError(str(exc)) from exc
     except ApiKeyUsageInFlightError as exc:
         raise DashboardConflictError(str(exc), code="api_key_usage_in_flight") from exc
-    except ValueError as exc:
+    except ApiKeyValidationError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_api_key_payload") from exc
     if "is_active" in fields and payload.is_active is False and row.is_active is False:
         AuditService.log_async(
@@ -277,4 +283,13 @@ async def get_api_key_usage_7d(
         total_cost_usd=result.total_cost_usd,
         total_requests=result.total_requests,
         cached_input_tokens=result.cached_input_tokens,
+        account_costs=[
+            ApiKeyAccountCostResponse(
+                account_id=ac.account_id,
+                email=ac.email,
+                cost_usd=ac.cost_usd,
+                is_deleted=ac.is_deleted,
+            )
+            for ac in result.account_costs
+        ],
     )

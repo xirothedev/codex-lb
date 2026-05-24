@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.db.models import DashboardSettings
 from app.modules.settings.repository import SettingsRepository
 
 
@@ -21,6 +20,12 @@ class DashboardSettingsData:
     totp_required_on_login: bool
     totp_configured: bool
     api_key_auth_enabled: bool
+    limit_warmup_enabled: bool
+    limit_warmup_windows: str
+    limit_warmup_model: str
+    limit_warmup_prompt: str
+    limit_warmup_cooldown_seconds: int
+    limit_warmup_min_available_percent: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +42,12 @@ class DashboardSettingsUpdateData:
     import_without_overwrite: bool
     totp_required_on_login: bool
     api_key_auth_enabled: bool
+    limit_warmup_enabled: bool
+    limit_warmup_windows: str
+    limit_warmup_model: str
+    limit_warmup_prompt: str
+    limit_warmup_cooldown_seconds: int
+    limit_warmup_min_available_percent: float
 
 
 class SettingsService:
@@ -45,7 +56,29 @@ class SettingsService:
 
     async def get_settings(self) -> DashboardSettingsData:
         row = await self._repository.get_or_create()
-        return self._row_to_data(row)
+        return DashboardSettingsData(
+            sticky_threads_enabled=row.sticky_threads_enabled,
+            upstream_stream_transport=row.upstream_stream_transport,
+            prefer_earlier_reset_accounts=row.prefer_earlier_reset_accounts,
+            routing_strategy=row.routing_strategy,
+            openai_cache_affinity_max_age_seconds=row.openai_cache_affinity_max_age_seconds,
+            dashboard_session_ttl_seconds=row.dashboard_session_ttl_seconds,
+            http_responses_session_bridge_prompt_cache_idle_ttl_seconds=(
+                row.http_responses_session_bridge_prompt_cache_idle_ttl_seconds
+            ),
+            http_responses_session_bridge_gateway_safe_mode=row.http_responses_session_bridge_gateway_safe_mode,
+            sticky_reallocation_budget_threshold_pct=row.sticky_reallocation_budget_threshold_pct,
+            import_without_overwrite=row.import_without_overwrite,
+            totp_required_on_login=row.totp_required_on_login,
+            totp_configured=row.totp_secret_encrypted is not None,
+            api_key_auth_enabled=row.api_key_auth_enabled,
+            limit_warmup_enabled=row.limit_warmup_enabled,
+            limit_warmup_windows=row.limit_warmup_windows,
+            limit_warmup_model=row.limit_warmup_model,
+            limit_warmup_prompt=row.limit_warmup_prompt,
+            limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
+            limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
+        )
 
     async def update_settings(self, payload: DashboardSettingsUpdateData) -> DashboardSettingsData:
         current = await self._repository.get_or_create()
@@ -66,10 +99,13 @@ class SettingsService:
             import_without_overwrite=payload.import_without_overwrite,
             totp_required_on_login=payload.totp_required_on_login,
             api_key_auth_enabled=payload.api_key_auth_enabled,
+            limit_warmup_enabled=payload.limit_warmup_enabled,
+            limit_warmup_windows=payload.limit_warmup_windows,
+            limit_warmup_model=payload.limit_warmup_model,
+            limit_warmup_prompt=payload.limit_warmup_prompt,
+            limit_warmup_cooldown_seconds=payload.limit_warmup_cooldown_seconds,
+            limit_warmup_min_available_percent=payload.limit_warmup_min_available_percent,
         )
-        return self._row_to_data(row)
-
-    def _row_to_data(self, row: DashboardSettings) -> DashboardSettingsData:
         return DashboardSettingsData(
             sticky_threads_enabled=row.sticky_threads_enabled,
             upstream_stream_transport=row.upstream_stream_transport,
@@ -86,4 +122,10 @@ class SettingsService:
             totp_required_on_login=row.totp_required_on_login,
             totp_configured=row.totp_secret_encrypted is not None,
             api_key_auth_enabled=row.api_key_auth_enabled,
+            limit_warmup_enabled=row.limit_warmup_enabled,
+            limit_warmup_windows=row.limit_warmup_windows,
+            limit_warmup_model=row.limit_warmup_model,
+            limit_warmup_prompt=row.limit_warmup_prompt,
+            limit_warmup_cooldown_seconds=row.limit_warmup_cooldown_seconds,
+            limit_warmup_min_available_percent=row.limit_warmup_min_available_percent,
         )

@@ -34,12 +34,8 @@ from app.core.auth.refresh import (
 )
 from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
 from app.core.balancer.rendezvous_hash import select_node
-from app.core.balancer.types import ClassifiedFailure, FailurePhase, UpstreamError
-from app.core.clients.files import (
-    FileProxyError,
-    pop_files_timeout_overrides,
-    push_files_timeout_overrides,
-)
+from app.core.balancer.types import ClassifiedFailure, UpstreamError
+from app.core.clients.files import FileProxyError, pop_files_timeout_overrides, push_files_timeout_overrides
 from app.core.clients.files import create_file as core_create_file
 from app.core.clients.files import finalize_file as core_finalize_file
 from app.core.clients.proxy import (
@@ -95,10 +91,8 @@ from app.core.metrics.prometheus import (
     bridge_reattach_total,
     bridge_same_account_takeover_total,
     bridge_soft_local_rebind_total,
-    client_exposed_errors_total,
     continuity_fail_closed_total,
     continuity_owner_resolution_total,
-    failover_total,
 )
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.models import CompactResponsePayload, OpenAIEvent, OpenAIResponsePayload
@@ -127,7 +121,6 @@ from app.db.models import (
 )
 from app.db.session import SessionLocal
 from app.modules.accounts.auth_manager import AccountsRepositoryPort, AuthManager
-from app.modules.accounts.runtime_health import PAUSE_REASON_PROXY_TRAFFIC
 from app.modules.api_keys.service import (
     ApiKeyData,
     ApiKeyInvalidError,
@@ -376,26 +369,6 @@ _WEBSOCKET_PREVIOUS_RESPONSE_ACCOUNT_CACHE_LIMIT = 4096
 _WEBSOCKET_CONTINUITY_CACHE_LIMIT = 4096
 _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS = 20
 _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS = 0.05
-
-
-def _deterministic_failover_metrics_enabled() -> bool:
-    return PROMETHEUS_AVAILABLE and get_settings().metrics_enabled
-
-
-def _observe_failover_decision(*, transport: str, failure_class: str, action: str) -> None:
-    if not _deterministic_failover_metrics_enabled():
-        return
-    if failover_total is not None:
-        failover_total.labels(
-            transport=transport,
-            failure_class=failure_class,
-            action=action,
-        ).inc()
-    if action == "surface" and client_exposed_errors_total is not None:
-        client_exposed_errors_total.labels(
-            transport=transport,
-            failure_class=failure_class,
-        ).inc()
 
 
 @dataclass(frozen=True, slots=True)
@@ -799,38 +772,12 @@ class ProxyService:
                 stored_count=durable_lookup.latest_input_item_count or 0,
                 stored_fingerprint=durable_lookup.latest_input_full_fingerprint,
             )
-            # Non-full-resend payloads (e.g. short follow-ups) depend on the
-            # upstream anchor being valid. If the upstream response has expired
-            # or continuity was lost, injecting the stale ID causes a 400
-            # previous_response_not_found. Skip injection when the current input
-            # fingerprint does not match the stored one.
-            inject_durable_anchor = True
-            if (
-                not durable_anchor_trimmable
-                and durable_lookup.latest_input_full_fingerprint is not None
-                and isinstance(payload.input, list)
-                and len(payload.input) > 0
-            ):
-                current_fingerprint = _fingerprint_input_items(cast(list[JsonValue], payload.input))
-                if current_fingerprint != durable_lookup.latest_input_full_fingerprint:
-                    inject_durable_anchor = False
-                    _log_http_bridge_event(
-                        "durable_anchor_skipped_fingerprint_mismatch",
-                        bridge_session_key,
-                        account_id=None,
-                        model=payload.model,
-                        detail=f"response_id={durable_lookup.latest_response_id}",
-                        cache_key_family=bridge_session_key.affinity_kind,
-                        model_class=_extract_model_class(payload.model) if payload.model else None,
-                    )
-
             if (
                 not live_local_session_exists
                 and not forwards_to_active_owner
                 and payload.previous_response_id is None
                 and bridge_session_key.strength == "hard"
                 and durable_lookup.latest_response_id is not None
-                and inject_durable_anchor
                 and (not _http_bridge_payload_looks_like_full_resend(payload) or durable_anchor_trimmable)
             ):
                 effective_payload = payload.model_copy(
@@ -1330,54 +1277,14 @@ class ProxyService:
                     effective_payload.previous_response_id,
                 )
             else:
-                # The trim branch could not succeed (fingerprint mismatch,
-                # no stored fingerprint, or input too short). For client-
-                # supplied previous_response_id this means a stale anchor.
-                # Drop it so the request goes through as a fresh turn,
-                # preventing upstream 400.
-                if (
-                    not proxy_injected_previous_response_id
-                    and effective_payload.previous_response_id is not None
-                    and stored_count > 0
-                ):
-                    fresh_resend_payload = effective_payload.model_copy(
-                        update={"previous_response_id": None}
-                    )
-                    request_state, text_data = self._prepare_http_bridge_request(
-                        fresh_resend_payload,
-                        headers,
-                        api_key=api_key,
-                        api_key_reservation=api_key_reservation,
-                        request_id=request_id,
-                    )
-                    if downstream_turn_state is not None:
-                        request_state.session_id = _normalize_session_id(downstream_turn_state)
-                    request_state.transport = _REQUEST_TRANSPORT_HTTP
-                    request_state.request_stage = _http_bridge_request_stage(
-                        headers=headers,
-                        payload=fresh_resend_payload,
-                        durable_lookup=durable_lookup,
-                    )
-                    request_state.fresh_upstream_request_text = text_data
-                    request_state.fresh_upstream_request_is_retry_safe = True
-                    _log_http_bridge_event(
-                        "client_previous_response_id_dropped_fingerprint_mismatch",
-                        bridge_session_key,
-                        account_id=None,
-                        model=payload.model,
-                        detail=f"previous_response_id={effective_payload.previous_response_id}",
-                        cache_key_family=bridge_session_key.affinity_kind,
-                        model_class=_extract_model_class(payload.model) if payload.model else None,
-                    )
-                else:
-                    logger.warning(
-                        "store_context_input_trim_skipped_prefix_mismatch request_id=%s incoming_items=%s "
-                        "stored_items=%s previous_response_id=%s",
-                        request_id,
-                        len(incoming_input_list),
-                        stored_count,
-                        effective_payload.previous_response_id,
-                    )
+                logger.warning(
+                    "store_context_input_trim_skipped_prefix_mismatch request_id=%s incoming_items=%s "
+                    "stored_items=%s previous_response_id=%s",
+                    request_id,
+                    len(incoming_input_list),
+                    stored_count,
+                    effective_payload.previous_response_id,
+                )
         session_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
             session,
             request_state=request_state,
@@ -1654,6 +1561,8 @@ class ProxyService:
                                 )
                             )
                             break
+                        if propagate_http_errors and request_state.response_id is None:
+                            continue
                         keepalive_sent = True
                         yielded_any = True
                         if request_state.response_id or request_state.replay_downstream_response_id:
@@ -2095,7 +2004,7 @@ class ProxyService:
                 account = selection.account
                 if not account:
                     if last_exc is not None:
-                        raise last_exc
+                        break
                     log_error_code = selection.error_code or "no_accounts"
                     log_error_message = selection.error_message or "No active accounts available"
                     raise ProxyResponseError(
@@ -2131,6 +2040,7 @@ class ProxyService:
 
                 safe_retry_budget = _COMPACT_SAME_CONTRACT_RETRY_BUDGET
                 transient_retries = 0
+                refresh_retry_used = False
                 transient_exhausted = False
                 while True:
                     try:
@@ -2163,10 +2073,62 @@ class ProxyService:
                             )
                             raise compact_continuity_error from exc
                         if exc.status_code == 401:
-                            await self._pause_account_for_upstream_401(account)
-                            excluded_account_ids.add(account.id)
-                            transient_exhausted = True
-                            break
+                            if refresh_retry_used:
+                                try:
+                                    await self._handle_proxy_error(account, exc)
+                                except Exception:
+                                    await self._settle_compact_api_key_usage(
+                                        api_key=api_key,
+                                        api_key_reservation=api_key_reservation,
+                                        response=None,
+                                        request_service_tier=request_service_tier,
+                                    )
+                                    raise
+                                last_exc = exc
+                                excluded_account_ids.add(account.id)
+                                transient_exhausted = True
+                                break
+                            try:
+                                remaining_budget = _remaining_budget_seconds(deadline)
+                                if remaining_budget <= 0:
+                                    logger.warning(
+                                        "Compact request budget exhausted before forced refresh retry request_id=%s "
+                                        "account_id=%s",
+                                        request_id,
+                                        account.id,
+                                    )
+                                    _raise_proxy_budget_exhausted()
+                                account = await self._ensure_fresh_with_budget(
+                                    account,
+                                    force=True,
+                                    timeout_seconds=remaining_budget,
+                                )
+                            except RefreshError as refresh_exc:
+                                if refresh_exc.is_permanent:
+                                    await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                                await self._settle_compact_api_key_usage(
+                                    api_key=api_key,
+                                    api_key_reservation=api_key_reservation,
+                                    response=None,
+                                    request_service_tier=request_service_tier,
+                                )
+                                raise exc
+                            except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
+                                await self._settle_compact_api_key_usage(
+                                    api_key=api_key,
+                                    api_key_reservation=api_key_reservation,
+                                    response=None,
+                                    request_service_tier=request_service_tier,
+                                )
+                                logger.warning(
+                                    "Compact forced refresh/connect failed request_id=%s account_id=%s",
+                                    request_id,
+                                    account.id,
+                                    exc_info=True,
+                                )
+                                _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
+                            refresh_retry_used = True
+                            continue
                         if exc.status_code == 500:
                             transient_retries += 1
                             if (
@@ -2239,11 +2201,6 @@ class ProxyService:
                             _account_attempt + 1,
                             classified["failure_class"],
                             action,
-                        )
-                        _observe_failover_decision(
-                            transport="compact",
-                            failure_class=classified["failure_class"],
-                            action=action,
                         )
                         if action == "failover_next":
                             last_exc = exc
@@ -2452,6 +2409,36 @@ class ProxyService:
                             return response
                         except ProxyResponseError as retry_exc:
                             await self._handle_proxy_error(account, retry_exc)
+                            if retry_exc.status_code == 401:
+                                selection = await self._select_account_with_budget_compatible(
+                                    deadline,
+                                    request_id=request_id,
+                                    kind=request_kind,
+                                    api_key=api_key,
+                                    sticky_key=affinity.key,
+                                    sticky_kind=affinity.kind,
+                                    reallocate_sticky=affinity.reallocate_sticky,
+                                    sticky_max_age_seconds=affinity.max_age_seconds,
+                                    prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                                    routing_strategy=routing_strategy,
+                                    model=selection_model,
+                                    exclude_account_ids={account.id},
+                                )
+                                if selection.account is not None:
+                                    account = selection.account
+                                    account_id_value = account.id
+                                    account = await self._ensure_fresh_with_budget_or_auth_error(
+                                        account,
+                                        timeout_seconds=_remaining_budget_seconds(deadline),
+                                    )
+                                    try:
+                                        response = await _call_goal(account)
+                                        await self._load_balancer.record_success(account)
+                                        log_status = "success"
+                                        return response
+                                    except ProxyResponseError as failover_exc:
+                                        await self._handle_proxy_error(account, failover_exc)
+                                        raise
                             raise
                     except RefreshError as refresh_exc:
                         if refresh_exc.is_permanent:
@@ -2633,6 +2620,36 @@ class ProxyService:
                             return response
                         except ProxyResponseError as retry_exc:
                             await self._handle_proxy_error(account, retry_exc)
+                            if retry_exc.status_code == 401:
+                                selection = await self._select_account_with_budget_compatible(
+                                    deadline,
+                                    request_id=request_id,
+                                    kind=request_kind,
+                                    api_key=api_key,
+                                    sticky_key=affinity.key,
+                                    sticky_kind=affinity.kind,
+                                    reallocate_sticky=affinity.reallocate_sticky,
+                                    sticky_max_age_seconds=affinity.max_age_seconds,
+                                    prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
+                                    routing_strategy=routing_strategy,
+                                    model=selection_model,
+                                    exclude_account_ids={account.id},
+                                )
+                                if selection.account is not None:
+                                    account = selection.account
+                                    account_id_value = account.id
+                                    account = await self._ensure_fresh_with_budget_or_auth_error(
+                                        account,
+                                        timeout_seconds=_remaining_budget_seconds(deadline),
+                                    )
+                                    try:
+                                        response = await _call_control(account)
+                                        await self._load_balancer.record_success(account)
+                                        log_status = "success"
+                                        return response
+                                    except ProxyResponseError as failover_exc:
+                                        await self._handle_proxy_error(account, failover_exc)
+                                        raise
                             raise
                     except RefreshError as refresh_exc:
                         if refresh_exc.is_permanent:
@@ -2695,6 +2712,25 @@ class ProxyService:
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
         routing_strategy = _routing_strategy(settings)
         try:
+            selection = await self._select_account_with_budget_compatible(
+                deadline,
+                request_id=request_id,
+                kind="transcribe",
+                api_key=api_key,
+                prefer_earlier_reset_accounts=prefer_earlier_reset,
+                routing_strategy=routing_strategy,
+                model=None,
+            )
+            account = selection.account
+            if not account:
+                log_error_code = selection.error_code or "no_accounts"
+                log_error_message = selection.error_message or "No active accounts available"
+                raise ProxyResponseError(
+                    503,
+                    openai_error(log_error_code, log_error_message),
+                )
+            account_id_value = account.id
+
             async def _call_transcribe(target: Account) -> dict[str, JsonValue]:
                 access_token = self._encryptor.decrypt(target.access_token_encrypted)
                 account_id = _header_account_id(target.chatgpt_account_id)
@@ -2723,84 +2759,101 @@ class ProxyService:
                 finally:
                     pop_transcribe_timeout_overrides(timeout_tokens)
 
-            excluded_account_ids: set[str] = set()
-            for _account_attempt in range(3):
-                selection = await self._select_account_with_budget(
-                    deadline,
-                    request_id=request_id,
-                    kind="transcribe",
-                    prefer_earlier_reset_accounts=prefer_earlier_reset,
-                    routing_strategy=routing_strategy,
-                    model=None,
-                    exclude_account_ids=excluded_account_ids,
-                )
-                account = selection.account
-                if not account:
-                    log_error_code = selection.error_code or "no_accounts"
-                    log_error_message = selection.error_message or "No active accounts available"
-                    if excluded_account_ids:
-                        raise ProxyResponseError(
-                            502,
-                            openai_error(
-                                "upstream_unavailable",
-                                "All account attempts exhausted",
-                                error_type="server_error",
-                            ),
-                        )
-                    raise ProxyResponseError(
-                        503,
-                        openai_error(log_error_code, log_error_message),
+            try:
+                remaining_budget = _remaining_budget_seconds(deadline)
+                if remaining_budget <= 0:
+                    logger.warning(
+                        "Transcription request budget exhausted before freshness check request_id=%s", request_id
                     )
-                account_id_value = account.id
-
+                    _raise_proxy_budget_exhausted()
+                try:
+                    account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    logger.warning(
+                        "Transcription refresh/connect failed request_id=%s account_id=%s",
+                        request_id,
+                        account.id,
+                        exc_info=True,
+                    )
+                    _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+                result = await _call_transcribe(account)
+                await self._load_balancer.record_success(account)
+                log_status = "success"
+                return result
+            except RefreshError as refresh_exc:
+                if refresh_exc.is_permanent:
+                    await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                raise ProxyResponseError(
+                    401,
+                    openai_error(
+                        "invalid_api_key",
+                        refresh_exc.message,
+                        error_type="invalid_request_error",
+                    ),
+                ) from refresh_exc
+            except ProxyResponseError as exc:
+                if exc.status_code != 401:
+                    await self._handle_proxy_error(account, exc)
+                    raise
                 try:
                     remaining_budget = _remaining_budget_seconds(deadline)
                     if remaining_budget <= 0:
                         logger.warning(
-                            "Transcription request budget exhausted before freshness check request_id=%s", request_id
-                        )
-                        _raise_proxy_budget_exhausted()
-                    try:
-                        account = await self._ensure_fresh_with_budget(account, timeout_seconds=remaining_budget)
-                    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                        logger.warning(
-                            "Transcription refresh/connect failed request_id=%s account_id=%s",
+                            "Transcription request budget exhausted before forced refresh retry "
+                            "request_id=%s account_id=%s",
                             request_id,
                             account.id,
-                            exc_info=True,
                         )
-                        _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+                        _raise_proxy_budget_exhausted()
+                    account = await self._ensure_fresh_with_budget(
+                        account, force=True, timeout_seconds=remaining_budget
+                    )
+                except RefreshError as refresh_exc:
+                    if refresh_exc.is_permanent:
+                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                    raise exc
+                except (aiohttp.ClientError, asyncio.TimeoutError) as timeout_exc:
+                    logger.warning(
+                        "Transcription forced refresh/connect failed request_id=%s account_id=%s",
+                        request_id,
+                        account.id,
+                        exc_info=True,
+                    )
+                    _raise_proxy_unavailable(str(timeout_exc) or "Request to upstream timed out")
+                try:
                     result = await _call_transcribe(account)
                     await self._load_balancer.record_success(account)
                     log_status = "success"
                     return result
-                except RefreshError as refresh_exc:
-                    if refresh_exc.is_permanent:
-                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
-                    raise ProxyResponseError(
-                        401,
-                        openai_error(
-                            "invalid_api_key",
-                            refresh_exc.message,
-                            error_type="invalid_request_error",
-                        ),
-                    ) from refresh_exc
-                except ProxyResponseError as exc:
-                    if exc.status_code != 401:
-                        await self._handle_proxy_error(account, exc)
-                        raise
-                    await self._pause_account_for_upstream_401(account)
-                    excluded_account_ids.add(account.id)
-                    continue
-            if excluded_account_ids:
-                raise ProxyResponseError(
-                    502,
-                    openai_error(
-                        "upstream_unavailable",
-                        "All account attempts exhausted",
-                        error_type="server_error",
-                    ),
-                )
+                except ProxyResponseError as retry_exc:
+                    await self._handle_proxy_error(account, retry_exc)
+                    if retry_exc.status_code == 401:
+                        selection = await self._select_account_with_budget_compatible(
+                            deadline,
+                            request_id=request_id,
+                            kind="transcribe",
+                            api_key=api_key,
+                            prefer_earlier_reset_accounts=prefer_earlier_reset,
+                            routing_strategy=routing_strategy,
+                            model=None,
+                            exclude_account_ids={account.id},
+                        )
+                        if selection.account is not None:
+                            account = selection.account
+                            account_id_value = account.id
+                            account = await self._ensure_fresh_with_budget_or_auth_error(
+                                account,
+                                timeout_seconds=_remaining_budget_seconds(deadline),
+                            )
+                            try:
+                                result = await _call_transcribe(account)
+                                await self._load_balancer.record_success(account)
+                                log_status = "success"
+                                return result
+                            except ProxyResponseError as failover_exc:
+                                await self._handle_proxy_error(account, failover_exc)
+                                raise
+                    raise
         except ProxyResponseError as exc:
             error = _parse_openai_error(exc.payload)
             log_error_code = log_error_code or _normalize_error_code(
@@ -3224,6 +3277,33 @@ class ProxyService:
                     return result, account_id_value
                 except ProxyResponseError as retry_exc:
                     await self._handle_proxy_error(account, retry_exc)
+                    if retry_exc.status_code == 401:
+                        selection = await self._select_account_with_budget_compatible(
+                            deadline,
+                            request_id=request_id,
+                            kind=kind,
+                            api_key=api_key,
+                            prefer_earlier_reset_accounts=prefer_earlier_reset,
+                            routing_strategy=routing_strategy,
+                            model=None,
+                            preferred_account_id=preferred_account_id,
+                            exclude_account_ids={account.id},
+                        )
+                        if selection.account is not None:
+                            account = selection.account
+                            account_id_value = account.id
+                            account = await self._ensure_fresh_with_budget_or_auth_error(
+                                account,
+                                timeout_seconds=_remaining_budget_seconds(deadline),
+                            )
+                            try:
+                                result = await _call(account)
+                                await self._load_balancer.record_success(account)
+                                log_status = "success"
+                                return result, account_id_value
+                            except ProxyResponseError as failover_exc:
+                                await self._handle_proxy_error(account, failover_exc)
+                                raise
                     raise
         except ProxyResponseError as exc:
             error = _parse_openai_error(exc.payload)
@@ -3818,10 +3898,10 @@ class ProxyService:
     ) -> _PreparedWebSocketRequest:
         refreshed_api_key = await self._refresh_websocket_api_key_policy(api_key)
         client_metadata = _response_create_client_metadata(payload, headers=headers)
-        normalized_request_payload = _response_create_request_payload(payload)
         responses_payload = normalize_responses_request_payload(
-            normalized_request_payload,
+            payload,
             openai_compat=openai_cache_affinity,
+            codex_tool_compat=codex_session_affinity,
         )
         previous_response_trimmed_input_count: int | None = None
         previous_response_trimmed_input_fingerprint: str | None = None
@@ -3897,37 +3977,31 @@ class ProxyService:
                     responses_payload.previous_response_id,
                     len(missing_call_ids),
                 )
-        # When the client's previous_response_id points to a response whose
-        # stored context fingerprint does not match the incoming input, the
-        # anchor is stale. Drop it so the request goes through as a fresh turn
-        # instead of hitting upstream 400. Only applies to client-supplied IDs.
-        # Also drop when no stored fingerprint exists — we cannot verify the
-        # anchor and it is safer to send a fresh turn than risk a 400.
+        # When the client's previous_response_id references a response whose
+        # tracked pending tool call ids do not cover the function_call_output
+        # items in the input, the anchor is stale. Drop it so the request goes
+        # through as a fresh turn instead of hitting upstream 400.
         if (
             not session_anchor
             and responses_payload.previous_response_id is not None
             and continuity_state is not None
+            and continuity_state.last_pending_function_call_ids
             and isinstance(responses_payload.input, list)
-            and not client_full_resend_retry_safe
         ):
-            stored_fp = continuity_state.last_completed_input_prefix_fingerprint
-            stored_count = continuity_state.last_completed_input_count or 0
-            if stored_count > 0:
-                incoming_prefix_fingerprint = _fingerprint_input_items(
-                    cast(list[JsonValue], responses_payload.input)[:stored_count]
-                )
-            else:
-                incoming_prefix_fingerprint = None
-            if stored_fp is None or incoming_prefix_fingerprint != stored_fp:
-                responses_payload = responses_payload.model_copy(
-                    update={"previous_response_id": None}
-                )
-                logger.info(
-                    "websocket_client_previous_response_id_dropped "
-                    "previous_response_id=%s reason=%s",
-                    responses_payload.previous_response_id,
-                    "fingerprint_mismatch" if stored_fp is not None else "no_stored_fingerprint",
-                )
+            input_items = cast(list[JsonValue], responses_payload.input)
+            output_call_ids = _function_call_output_call_ids(input_items)
+            if output_call_ids:
+                pending_set = set(continuity_state.last_pending_function_call_ids)
+                if not output_call_ids.issubset(pending_set):
+                    stale_ids = output_call_ids - pending_set
+                    responses_payload = responses_payload.model_copy(
+                        update={"previous_response_id": None}
+                    )
+                    logger.info(
+                        "websocket_client_previous_response_id_dropped_stale_call_id "
+                        "previous_response_id=%s stale_call_ids=%s",
+                        stale_ids,
+                    )
         reservation = await self._reserve_websocket_api_key_usage(
             refreshed_api_key,
             request_model=responses_payload.model,
@@ -4503,7 +4577,6 @@ class ProxyService:
             if remaining_budget <= 0:
                 await self._emit_websocket_connect_timeout(
                     websocket=websocket,
-
                     client_send_lock=client_send_lock,
                     account_id=account.id,
                     api_key=api_key,
@@ -4675,11 +4748,14 @@ class ProxyService:
     ) -> str:
         classified = await self._handle_websocket_connect_error(account, exc)
         failure_class = classified["failure_class"] if isinstance(classified, dict) else "non_retryable"
-        if deterministic_failover_enabled:
+        candidates_remaining = max_attempts - attempt
+        if exc.status_code == 401 and candidates_remaining > 0:
+            action = "failover_next"
+        elif deterministic_failover_enabled:
             action = failover_decision(
                 failure_class=failure_class,
                 downstream_visible=False,
-                candidates_remaining=max_attempts - attempt,
+                candidates_remaining=candidates_remaining,
             )
         else:
             action = "surface"
@@ -4709,7 +4785,6 @@ class ProxyService:
             api_key=api_key,
             request_state=request_state,
         )
-
 
     async def _open_upstream_websocket_with_budget(
         self,
@@ -5461,46 +5536,6 @@ class ProxyService:
                                     bridge_soft_local_rebind_total.inc()
                                 if bridge_local_rebind_total is not None:
                                     bridge_local_rebind_total.labels(reason="prompt_cache_locality_miss").inc()
-
-                if shutdown_state.is_bridge_drain_active():
-                    raise ProxyResponseError(
-                        503,
-                        openai_error(
-                            "bridge_drain_active",
-                            "HTTP bridge is draining — new sessions not accepted during shutdown",
-                            error_type="server_error",
-                        ),
-                    )
-
-                owner_instance = await _http_bridge_owner_instance(key, settings, self._ring_membership)
-                current_instance, ring = await _active_http_bridge_instance_ring(settings, self._ring_membership)
-                if (
-                    key.affinity_kind != "request"
-                    and owner_instance is not None
-                    and len(ring) > 1
-                    and owner_instance != current_instance
-                ):
-                    _log_http_bridge_event(
-                        "owner_mismatch_retry",
-                        key,
-                        account_id=None,
-                        model=request_model,
-                        detail=(
-                            f"expected_instance={owner_instance}, current_instance={current_instance}, outcome=retry"
-                        ),
-                        cache_key_family=key.affinity_kind,
-                        model_class=_extract_model_class(request_model) if request_model else None,
-                    )
-                    if PROMETHEUS_AVAILABLE and bridge_instance_mismatch_total is not None:
-                        bridge_instance_mismatch_total.labels(outcome="retry").inc()
-                    raise ProxyResponseError(
-                        409,
-                        openai_error(
-                            "bridge_instance_mismatch",
-                            "HTTP bridge session is owned by a different instance; retry to reach the correct replica",
-                            error_type="server_error",
-                        ),
-                    )
 
                 if existing is not None:
                     old_account_id = existing.account.id
@@ -6265,6 +6300,43 @@ class ProxyService:
                     selected_account_id=account.id,
                 )
                 break
+            except ProxyResponseError as exc:
+                if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
+                    raise
+                try:
+                    account = await self._ensure_fresh_with_budget(
+                        account,
+                        force=True,
+                        timeout_seconds=_remaining_budget_seconds(deadline),
+                    )
+                    connect_headers = _headers_with_turn_state(headers, _sticky_key_from_turn_state_header(headers))
+                    upstream = await self._open_upstream_websocket_with_budget(
+                        account,
+                        connect_headers,
+                        timeout_seconds=_remaining_budget_seconds(deadline),
+                    )
+                    _record_same_account_takeover(
+                        preferred_account_id=preferred_account_id,
+                        selected_account_id=account.id,
+                    )
+                    break
+                except ProxyResponseError as retry_exc:
+                    if retry_exc.status_code != 401:
+                        raise
+                    await self._handle_proxy_error(account, retry_exc)
+                    if require_preferred_account and selected_is_preferred:
+                        raise
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
+                except RefreshError as refresh_exc:
+                    if refresh_exc.is_permanent:
+                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                    if require_preferred_account and selected_is_preferred:
+                        raise
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
             except RefreshError as exc:
                 if exc.is_permanent:
                     await self._load_balancer.mark_permanent_failure(account, exc.code)
@@ -6988,6 +7060,42 @@ class ProxyService:
                     selected_account_id=account.id,
                 )
                 break
+            except ProxyResponseError as exc:
+                if exc.status_code != 401 or _remaining_budget_seconds(deadline) <= 0:
+                    raise
+                try:
+                    account = await self._ensure_fresh_with_budget(
+                        account,
+                        force=True,
+                        timeout_seconds=_remaining_budget_seconds(deadline),
+                    )
+                    connect_headers = _headers_with_turn_state(
+                        session.headers,
+                        _preferred_http_bridge_reconnect_turn_state(session),
+                    )
+                    upstream = await self._open_upstream_websocket_with_budget(
+                        account,
+                        connect_headers,
+                        timeout_seconds=_remaining_budget_seconds(deadline),
+                    )
+                    _record_same_account_takeover(
+                        preferred_account_id=session.account.id,
+                        selected_account_id=account.id,
+                    )
+                    break
+                except ProxyResponseError as retry_exc:
+                    if retry_exc.status_code != 401:
+                        raise
+                    await self._handle_proxy_error(account, retry_exc)
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
+                except RefreshError as refresh_exc:
+                    if refresh_exc.is_permanent:
+                        await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+                    excluded_account_ids.add(account.id)
+                    preferred_candidate_id = None
+                    continue
             except RefreshError as exc:
                 if exc.is_permanent:
                     await self._load_balancer.mark_permanent_failure(account, exc.code)
@@ -7632,7 +7740,6 @@ class ProxyService:
         )
         return account_id
 
-
     async def _handle_websocket_connect_error(self, account: Account, exc: ProxyResponseError) -> ClassifiedFailure:
         error = _parse_openai_error(exc.payload)
         error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
@@ -7640,7 +7747,6 @@ class ProxyService:
             account,
             _upstream_error_from_openai(error),
             error_code,
-
             http_status=exc.status_code,
         )
 
@@ -9697,11 +9803,6 @@ class ProxyService:
                                     classified["failure_class"],
                                     action,
                                 )
-                                _observe_failover_decision(
-                                    transport="stream",
-                                    failure_class=classified["failure_class"],
-                                    action=action,
-                                )
                                 if action == "failover_next":
                                     last_transient_exc = tex
                                     excluded_account_ids.add(account.id)
@@ -9780,7 +9881,6 @@ class ProxyService:
                     return
                 except ProxyResponseError as exc:
                     if exc.status_code == 401:
-                        await self._pause_account_for_upstream_401(account)
                         remaining_budget = _remaining_budget_seconds(deadline)
                         if remaining_budget <= 0:
                             logger.warning(
@@ -9884,6 +9984,100 @@ class ProxyService:
                                 tool_call_dedupe=tool_call_dedupe,
                             ):
                                 yield line
+                        except ProxyResponseError as retry_exc:
+                            if settlement.downstream_visible:
+                                failed_response_id = settlement.response_id or request_id
+                                error = _parse_openai_error(retry_exc.payload)
+                                error_code = _normalize_error_code(
+                                    error.code if error else None,
+                                    error.type if error else None,
+                                )
+                                error_message = error.message if error else "Upstream error"
+                                event = response_failed_event(
+                                    error_code or "upstream_error",
+                                    error_message or "Upstream error",
+                                    error_type=(error.type if error else None) or "server_error",
+                                    response_id=failed_response_id,
+                                    error_param=error.param if error else None,
+                                )
+                                _apply_error_metadata(event["response"]["error"], error)
+                                logger.warning(
+                                    "Surfacing post-refresh stream failure without replay "
+                                    "request_id=%s account_id=%s code=%s",
+                                    request_id,
+                                    account.id,
+                                    error_code,
+                                )
+                                yield format_sse_event(event)
+                                settlement.record_success = False
+                                settlement.error_code = error_code
+                                settlement.error_message = error_message
+                                settlement.error = _upstream_error_from_openai(error)
+                                settlement.account_health_error = _should_penalize_stream_error(error_code)
+                                if settlement.account_health_error:
+                                    await self._handle_stream_error(
+                                        account,
+                                        _stream_settlement_error_payload(settlement),
+                                        settlement.error_code or "upstream_error",
+                                        http_status=retry_exc.status_code,
+                                    )
+                                settled = await self._settle_stream_api_key_usage(
+                                    api_key,
+                                    api_key_reservation,
+                                    settlement,
+                                    request_id,
+                                )
+                                return
+                            error = _parse_openai_error(retry_exc.payload)
+                            error_code = _normalize_error_code(
+                                error.code if error else None,
+                                error.type if error else None,
+                            )
+                            if _is_account_neutral_error_code(error_code):
+                                raise
+                            classified = await self._handle_stream_error(
+                                account,
+                                _upstream_error_from_openai(error),
+                                error_code,
+                                http_status=retry_exc.status_code,
+                            )
+                            candidates_remaining = max_attempts - attempt - 1
+                            if retry_exc.status_code == 401 and candidates_remaining > 0:
+                                action = "failover_next"
+                            elif getattr(base_settings, "deterministic_failover_enabled", True):
+                                action = failover_decision(
+                                    failure_class=classified["failure_class"],
+                                    downstream_visible=False,
+                                    candidates_remaining=candidates_remaining,
+                                )
+                            else:
+                                action = "surface"
+                            logger.info(
+                                "Failover decision request_id=%s transport=stream account_id=%s "
+                                "attempt=%d phase=post_refresh failure_class=%s action=%s",
+                                request_id,
+                                account.id,
+                                attempt + 1,
+                                classified["failure_class"],
+                                action,
+                            )
+                            if action == "failover_next":
+                                last_transient_exc = retry_exc
+                                excluded_account_ids.add(account.id)
+                                continue
+                            if propagate_http_errors:
+                                raise
+                            error_message = error.message if error else None
+                            event = response_failed_event(
+                                error_code or "upstream_error",
+                                error_message or "Upstream error",
+                                error_type=(error.type if error else None) or "server_error",
+                                response_id=request_id,
+                                error_param=error.param if error else None,
+                            )
+                            _apply_error_metadata(event["response"]["error"], error)
+                            yield format_sse_event(event)
+                            return
                         finally:
                             pop_stream_timeout_overrides(stream_timeout_tokens)
                         if settlement.account_health_error:
@@ -10826,6 +11020,29 @@ class ProxyService:
             return await self._ensure_fresh(account, force=force, timeout_seconds=timeout_seconds)
         return await self._ensure_fresh(account, force=force)
 
+    async def _ensure_fresh_with_budget_or_auth_error(
+        self,
+        account: Account,
+        *,
+        timeout_seconds: float | None = None,
+        error_type: str = "invalid_request_error",
+    ) -> Account:
+        try:
+            return await self._ensure_fresh_with_budget(account, timeout_seconds=timeout_seconds)
+        except RefreshError as refresh_exc:
+            if refresh_exc.is_permanent:
+                await self._load_balancer.mark_permanent_failure(account, refresh_exc.code)
+            raise ProxyResponseError(
+                401,
+                openai_error(
+                    "invalid_api_key",
+                    refresh_exc.message,
+                    error_type=error_type,
+                ),
+            ) from refresh_exc
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            _raise_proxy_unavailable(str(exc) or "Request to upstream timed out")
+
     async def _select_account_with_budget(
         self,
         deadline: float,
@@ -10910,9 +11127,6 @@ class ProxyService:
             logger.warning("%s account selection exceeded request budget request_id=%s", kind.title(), request_id)
             _raise_proxy_budget_exhausted()
 
-    async def _pause_account_for_upstream_401(self, account: Account) -> None:
-        await self._load_balancer.mark_paused(account, PAUSE_REASON_PROXY_TRAFFIC)
-
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:
         error = _parse_openai_error(exc.payload)
         code = _normalize_error_code(
@@ -10933,14 +11147,13 @@ class ProxyService:
         account: Account,
         error: UpstreamError,
         code: str,
-        phase: FailurePhase = "first_event",
         http_status: int | None = None,
     ) -> ClassifiedFailure:
         classified = classify_upstream_failure(
             error_code=code,
             error=error,
             http_status=http_status,
-            phase=phase,
+            phase="first_event",
         )
         if _is_account_neutral_error_code(code):
             return classified
@@ -13616,13 +13829,6 @@ def _response_create_client_metadata(
         client_metadata.setdefault("x-codex-turn-metadata", turn_metadata)
 
     return client_metadata or None
-
-
-def _response_create_request_payload(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
-    response = payload.get("response")
-    if is_json_mapping(response):
-        return dict(response)
-    return dict(payload)
 
 
 def _headers_with_turn_state(headers: Mapping[str, str], turn_state: str | None) -> dict[str, str]:

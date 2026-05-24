@@ -35,6 +35,14 @@ class ViewerUsageSummary(BaseModel):
     avg_latency_ms: float | None = None
 
 
+class ViewerQuotaEntry(BaseModel):
+    limit_type: str
+    limit_window: str
+    max_value: int
+    current_value: int
+    reset_at: datetime
+
+
 class ViewerKeyInfo(BaseModel):
     key_name: str
     is_active: bool

@@ -44,9 +44,18 @@ export const ViewerKeyInfoSchema = z.object({
   is_active: z.boolean(),
 });
 
+export const ViewerQuotaEntrySchema = z.object({
+  limit_type: z.string(),
+  limit_window: z.string(),
+  max_value: z.number(),
+  current_value: z.number(),
+  reset_at: z.string(),
+});
+
 export type ViewerLoginRequest = z.infer<typeof ViewerLoginRequestSchema>;
 export type ViewerLoginResponse = z.infer<typeof ViewerLoginResponseSchema>;
 export type ViewerRequestLogEntry = z.infer<typeof ViewerRequestLogEntrySchema>;
 export type ViewerRequestLogsResponse = z.infer<typeof ViewerRequestLogsResponseSchema>;
 export type ViewerUsageSummary = z.infer<typeof ViewerUsageSummarySchema>;
 export type ViewerKeyInfo = z.infer<typeof ViewerKeyInfoSchema>;
+export type ViewerQuotaEntry = z.infer<typeof ViewerQuotaEntrySchema>;

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_session
 from app.modules.viewer_auth.schemas import ViewerSessionData
 from app.modules.viewer_auth.service import get_viewer_session_store
-from app.modules.viewer_portal.schemas import ViewerKeyInfo, ViewerRequestLogsResponse, ViewerUsageSummary
+from app.modules.viewer_portal.schemas import ViewerKeyInfo, ViewerQuotaEntry, ViewerRequestLogsResponse, ViewerUsageSummary
 from app.modules.viewer_portal.service import ViewerPortalService
 
 router = APIRouter(prefix="/viewer", tags=["viewer-portal"])
@@ -54,3 +54,12 @@ async def get_key_info(
     session_data: ViewerSessionData = Depends(_get_viewer_session),
 ):
     return ViewerKeyInfo(key_name=session_data.key_name, is_active=session_data.is_active)
+
+
+@router.get("/quota", response_model=list[ViewerQuotaEntry])
+async def get_quota(
+    session_data: ViewerSessionData = Depends(_get_viewer_session),
+    db: AsyncSession = Depends(get_session),
+):
+    service = ViewerPortalService(db)
+    return await service.get_quota(session_data.api_key_id)

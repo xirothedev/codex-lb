@@ -5,8 +5,9 @@ from datetime import datetime, timedelta
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import RequestLog
+from app.db.models import ApiKeyLimit, RequestLog
 from app.modules.viewer_portal.schemas import (
+    ViewerQuotaEntry,
     ViewerRequestLogEntry,
     ViewerRequestLogsResponse,
     ViewerUsageSummary,
@@ -102,3 +103,21 @@ class ViewerPortalService:
             total_cost_usd=round(total_cost, 6),
             avg_latency_ms=round(avg_latency, 1) if avg_latency else None,
         )
+
+    async def get_quota(self, api_key_id: str) -> list[ViewerQuotaEntry]:
+        result = await self._session.execute(
+            sa.select(ApiKeyLimit).where(
+                ApiKeyLimit.api_key_id == api_key_id,
+            )
+        )
+        limits = result.scalars().all()
+        return [
+            ViewerQuotaEntry(
+                limit_type=l.limit_type.value,
+                limit_window=l.limit_window.value,
+                max_value=l.max_value,
+                current_value=l.current_value,
+                reset_at=l.reset_at,
+            )
+            for l in limits
+        ]

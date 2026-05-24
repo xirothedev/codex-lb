@@ -3,10 +3,11 @@ import {
   ViewerKeyInfoSchema,
   ViewerLoginRequestSchema,
   ViewerLoginResponseSchema,
+  ViewerQuotaEntrySchema,
   ViewerRequestLogsResponseSchema,
   ViewerUsageSummarySchema,
 } from "@/features/viewer/schemas";
-import type { ViewerLoginRequest } from "@/features/viewer/schemas";
+import type { ViewerLoginRequest, ViewerQuotaEntry } from "@/features/viewer/schemas";
 
 const BASE = "/viewer";
 
@@ -36,4 +37,8 @@ export function getViewerUsage(since?: string) {
 
 export function getViewerKeyInfo() {
   return get(`${BASE}/key-info`, ViewerKeyInfoSchema);
+}
+
+export function getViewerQuota(): Promise<ViewerQuotaEntry[]> {
+  return get(`${BASE}/quota`, z.array(ViewerQuotaEntrySchema));
 }

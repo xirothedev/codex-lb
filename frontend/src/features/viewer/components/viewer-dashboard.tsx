@@ -15,6 +15,7 @@ import {
 } from "@/components/ui/table";
 import { getViewerKeyInfo, getViewerLogs, getViewerUsage } from "@/features/viewer/api";
 import { useViewerStore } from "@/features/viewer/hooks/use-viewer";
+import { useEffect } from "react";
 
 function formatTokens(n: number | null): string {
   if (n === null) return "—";
@@ -50,6 +51,12 @@ function StatusBadge({ status }: { status: string }) {
 
 export function ViewerDashboard() {
   const logout = useViewerStore((s) => s.logout);
+  const loadQuota = useViewerStore((s) => s.loadQuota);
+  const quota = useViewerStore((s) => s.quota);
+
+  useEffect(() => {
+    void loadQuota();
+  }, [loadQuota]);
 
   const { data: keyInfo, isLoading: keyLoading } = useQuery({
     queryKey: ["viewer", "key-info"],
@@ -163,6 +170,34 @@ export function ViewerDashboard() {
                   </CardContent>
                 </Card>
               </div>
+            ) : null}
+
+            {quota && quota.length > 0 ? (
+              <Card className="mb-6">
+                <CardHeader>
+                  <CardTitle className="text-sm font-semibold">Quota Limits</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    {quota.map((q, i) => (
+                      <div
+                        key={i}
+                        className="rounded-lg border bg-muted/50 p-3"
+                      >
+                        <div className="text-xs font-medium text-muted-foreground capitalize">
+                          {q.limit_type.replace("_", " ")}
+                        </div>
+                        <div className="mt-1 text-lg font-semibold">
+                          {q.current_value.toLocaleString()} / {q.max_value.toLocaleString()}
+                        </div>
+                        <div className="mt-0.5 text-xs text-muted-foreground">
+                          {q.limit_window} · resets {format(new Date(q.reset_at), "MMM d, HH:mm")}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
             ) : null}
 
             {logs ? (

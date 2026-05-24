@@ -1311,14 +1311,53 @@ class ProxyService:
                     effective_payload.previous_response_id,
                 )
             else:
-                logger.warning(
-                    "store_context_input_trim_skipped_prefix_mismatch request_id=%s incoming_items=%s "
-                    "stored_items=%s previous_response_id=%s",
-                    request_id,
-                    len(incoming_input_list),
-                    stored_count,
-                    effective_payload.previous_response_id,
-                )
+                # The client's previous_response_id points to a response whose
+                # stored context fingerprint does not match the incoming input.
+                # This is a stale anchor — dropping it so the request goes
+                # through as a fresh turn prevents upstream 400.
+                if (
+                    not proxy_injected_previous_response_id
+                    and effective_payload.previous_response_id is not None
+                    and stored_fingerprint is not None
+                ):
+                    fresh_resend_payload = effective_payload.model_copy(
+                        update={"previous_response_id": None}
+                    )
+                    request_state, text_data = self._prepare_http_bridge_request(
+                        fresh_resend_payload,
+                        headers,
+                        api_key=api_key,
+                        api_key_reservation=api_key_reservation,
+                        request_id=request_id,
+                    )
+                    if downstream_turn_state is not None:
+                        request_state.session_id = _normalize_session_id(downstream_turn_state)
+                    request_state.transport = _REQUEST_TRANSPORT_HTTP
+                    request_state.request_stage = _http_bridge_request_stage(
+                        headers=headers,
+                        payload=fresh_resend_payload,
+                        durable_lookup=durable_lookup,
+                    )
+                    request_state.fresh_upstream_request_text = text_data
+                    request_state.fresh_upstream_request_is_retry_safe = True
+                    _log_http_bridge_event(
+                        "client_previous_response_id_dropped_fingerprint_mismatch",
+                        bridge_session_key,
+                        account_id=None,
+                        model=payload.model,
+                        detail=f"previous_response_id={effective_payload.previous_response_id}",
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(payload.model) if payload.model else None,
+                    )
+                else:
+                    logger.warning(
+                        "store_context_input_trim_skipped_prefix_mismatch request_id=%s incoming_items=%s "
+                        "stored_items=%s previous_response_id=%s",
+                        request_id,
+                        len(incoming_input_list),
+                        stored_count,
+                        effective_payload.previous_response_id,
+                    )
         session_events: AsyncGenerator[str, None] = self._stream_http_bridge_session_events(
             session,
             request_state=request_state,
@@ -3826,6 +3865,32 @@ class ProxyService:
                     "websocket_interrupted_tool_outputs_injected previous_response_id=%s missing_call_count=%s",
                     responses_payload.previous_response_id,
                     len(missing_call_ids),
+                )
+        # When the client's previous_response_id points to a response whose
+        # stored context fingerprint does not match the incoming input, the
+        # anchor is stale. Drop it so the request goes through as a fresh turn
+        # instead of hitting upstream 400. Only applies to client-supplied IDs.
+        if (
+            not session_anchor
+            and responses_payload.previous_response_id is not None
+            and continuity_state is not None
+            and continuity_state.last_completed_input_prefix_fingerprint is not None
+            and isinstance(responses_payload.input, list)
+            and not client_full_resend_retry_safe
+        ):
+            incoming_prefix_fingerprint = _fingerprint_input_items(
+                cast(list[JsonValue], responses_payload.input)[
+                    : continuity_state.last_completed_input_count or 0
+                ]
+            )
+            if incoming_prefix_fingerprint != continuity_state.last_completed_input_prefix_fingerprint:
+                responses_payload = responses_payload.model_copy(
+                    update={"previous_response_id": None}
+                )
+                logger.info(
+                    "websocket_client_previous_response_id_dropped_fingerprint_mismatch "
+                    "previous_response_id=%s",
+                    responses_payload.previous_response_id,
                 )
         reservation = await self._reserve_websocket_api_key_usage(
             refreshed_api_key,

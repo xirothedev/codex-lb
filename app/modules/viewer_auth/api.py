@@ -29,7 +29,7 @@ async def login(request: ViewerLoginRequest, response: Response):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API key is inactive")
 
     session_data = ViewerSessionData(
-        api_key_id=key_data.key_id,
+        api_key_id=key_data.id,
         key_name=key_data.name,
         is_active=key_data.is_active,
     )

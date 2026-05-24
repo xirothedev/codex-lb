@@ -38,19 +38,23 @@ export default function App() {
   return (
     <TooltipProvider>
       <Toaster richColors />
-      <AuthGate>
-        <Routes>
-          <Route element={<AppLayout />}>
-            <Route path="/" element={<Navigate to="/dashboard" replace />} />
-            <Route path="/dashboard" element={<DashboardPage />} />
-            <Route path="/accounts" element={<AccountsPage />} />
-            <Route path="/apis" element={<ApisPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/firewall" element={<Navigate to="/settings" replace />} />
-          </Route>
-          <Route path="/viewer" element={<ViewerPage />} />
-        </Routes>
-      </AuthGate>
+      <Routes>
+        <Route path="/viewer" element={<ViewerPage />} />
+        <Route
+          element={
+            <AuthGate>
+              <AppLayout />
+            </AuthGate>
+          }
+        >
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
+          <Route path="/accounts" element={<AccountsPage />} />
+          <Route path="/apis" element={<ApisPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/firewall" element={<Navigate to="/settings" replace />} />
+        </Route>
+      </Routes>
     </TooltipProvider>
   );
 }

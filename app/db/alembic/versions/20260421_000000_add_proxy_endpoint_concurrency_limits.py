@@ -48,7 +48,7 @@ def upgrade() -> None:
                 "proxy_endpoint_concurrency_limits",
                 sa.JSON(),
                 nullable=False,
-                server_default=sa.text(f"'{_DEFAULT_LIMITS_JSON}'"),
+                server_default=sa.text(f"'{_DEFAULT_LIMITS_JSON}'".replace(":", "\\:")),
             )
         )
 

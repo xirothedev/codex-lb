@@ -71,6 +71,7 @@ export type RecentRequestsTableProps = {
   onOffsetChange: (offset: number) => void;
   showAccountColumn?: boolean;
   showApiKeyColumn?: boolean;
+  showPlanColumn?: boolean;
 };
 
 function formatRequestCostSummary(request: RequestLog | null): string | null {
@@ -124,6 +125,7 @@ export function RecentRequestsTable({
   onOffsetChange,
   showAccountColumn = true,
   showApiKeyColumn = true,
+  showPlanColumn = true,
 }: RecentRequestsTableProps) {
   const [selectedRequest, setSelectedRequest] = useState<RequestLog | null>(null);
   const blurred = usePrivacyStore((s) => s.blurred);
@@ -167,7 +169,7 @@ export function RecentRequestsTable({
             <TableRow className="hover:bg-transparent">
               <TableHead className="w-28 pl-4 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Time</TableHead>
               {showAccountColumn ? <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Account</TableHead> : null}
-              <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Plan</TableHead>
+              {showPlanColumn ? <TableHead className="w-24 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Plan</TableHead> : null}
               {showApiKeyColumn ? <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">API Key</TableHead> : null}
               <TableHead className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Model</TableHead>
               <TableHead className="w-20 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">Transport</TableHead>
@@ -207,6 +209,7 @@ export function RecentRequestsTable({
                       )}
                     </TableCell>
                   ) : null}
+                  {showPlanColumn ? (
                   <TableCell className="align-top">
                     {planType ? (
                       <Badge
@@ -219,6 +222,7 @@ export function RecentRequestsTable({
                       <span className="text-xs text-muted-foreground">--</span>
                     )}
                   </TableCell>
+                  ) : null}
                   {showApiKeyColumn ? (
                     <TableCell className="truncate align-top text-xs text-muted-foreground">
                       {request.apiKeyName || "--"}
@@ -343,7 +347,7 @@ export function RecentRequestsTable({
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label="Status" value={selectedRequest ? (REQUEST_STATUS_LABELS[selectedRequest.status] ?? selectedRequest.status) : "—"} />
                 <RequestDetailField label="Model" value={selectedRequest ? formatModelLabel(selectedRequest.model, selectedRequest.reasoningEffort, selectedRequest.actualServiceTier ?? selectedRequest.serviceTier) : "—"} mono />
-                <RequestDetailField label="Plan" value={selectedRequest?.planType ? formatSlug(selectedRequest.planType) : "—"} />
+                {showPlanColumn ? <RequestDetailField label="Plan" value={selectedRequest?.planType ? formatSlug(selectedRequest.planType) : "—"} /> : null}
                 <RequestDetailField label="Transport" value={selectedRequest?.transport ? (TRANSPORT_LABELS[selectedRequest.transport] ?? selectedRequest.transport) : "—"} />
                 <RequestDetailField label="Time" value={selectedRequest ? formatDateTimeInline(selectedRequest.requestedAt) : "—"} />
                 <RequestDetailField label="Error Code" value={selectedRequest?.errorCode ?? "—"} mono />

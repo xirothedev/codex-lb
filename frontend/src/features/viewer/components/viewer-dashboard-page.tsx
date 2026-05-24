@@ -121,6 +121,7 @@ export function ViewerDashboardPage() {
           onOffsetChange={(offset) => updateFilters({ offset })}
           showAccountColumn={false}
           showApiKeyColumn={false}
+          showPlanColumn={false}
         />
       </section>
     </div>

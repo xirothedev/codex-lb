@@ -1,7 +1,7 @@
-"""merge accounts_alias and fork_compat heads
+"""merge accounts_alias, fork_compat, and response_snapshots heads
 
 Revision ID: 20260524_000000_merge_accounts_alias_and_fork_compat
-Revises: 20260513_000000_add_accounts_alias, 20260518_010000_merge_upstream_durable_bridge_and_fork_heads
+Revises: 20260513_000000_add_accounts_alias, 20260518_010000_merge_upstream_durable_bridge_and_fork_heads, 20260315_120000_add_response_snapshots
 Create Date: 2026-05-24
 """
 
@@ -11,6 +11,7 @@ revision = "20260524_000000_merge_accounts_alias_and_fork_compat"
 down_revision = (
     "20260513_000000_add_accounts_alias",
     "20260518_010000_merge_upstream_durable_bridge_and_fork_heads",
+    "20260315_120000_add_response_snapshots",
 )
 branch_labels = None
 depends_on = None

@@ -10,6 +10,7 @@ import { AccountsPage } from "@/features/accounts/components/accounts-page";
 import { ApisPage } from "@/features/apis/components/apis-page";
 import { DashboardPage } from "@/features/dashboard/components/dashboard-page";
 import { SettingsPage } from "@/features/settings/components/settings-page";
+import { ViewerPage } from "@/features/viewer/components/viewer-page";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
 
 function AppLayout() {
@@ -47,6 +48,7 @@ export default function App() {
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/firewall" element={<Navigate to="/settings" replace />} />
           </Route>
+          <Route path="/viewer" element={<ViewerPage />} />
         </Routes>
       </AuthGate>
     </TooltipProvider>

@@ -62,6 +62,8 @@ from app.modules.settings import api as settings_api
 from app.modules.sticky_sessions import api as sticky_sessions_api
 from app.modules.sticky_sessions.cleanup_scheduler import build_sticky_session_cleanup_scheduler
 from app.modules.usage import api as usage_api
+from app.modules.viewer_auth import api as viewer_auth_api
+from app.modules.viewer_portal import api as viewer_portal_api
 from app.modules.usage.additional_quota_keys import reload_additional_quota_registry
 
 logger = logging.getLogger(__name__)
@@ -372,12 +374,14 @@ def create_app() -> FastAPI:
     app.include_router(sticky_sessions_api.router)
     app.include_router(api_keys_api.router)
     app.include_router(health_api.router)
+    app.include_router(viewer_auth_api.router)
+    app.include_router(viewer_portal_api.router)
 
     static_dir = Path(__file__).parent / "static"
     index_html = static_dir / "index.html"
     static_root = static_dir.resolve()
     frontend_build_hint = "Frontend assets are missing. Run `cd frontend && bun run build`."
-    excluded_prefixes = ("api/", "v1/", "backend-api/", "health")
+    excluded_prefixes = ("api/", "v1/", "backend-api/", "health", "viewer/")
 
     def _is_static_asset_path(path: str) -> bool:
         if path.startswith("assets/"):

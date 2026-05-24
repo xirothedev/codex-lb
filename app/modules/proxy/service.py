@@ -1311,14 +1311,15 @@ class ProxyService:
                     effective_payload.previous_response_id,
                 )
             else:
-                # The client's previous_response_id points to a response whose
-                # stored context fingerprint does not match the incoming input.
-                # This is a stale anchor — dropping it so the request goes
-                # through as a fresh turn prevents upstream 400.
+                # The trim branch could not succeed (fingerprint mismatch,
+                # no stored fingerprint, or input too short). For client-
+                # supplied previous_response_id this means a stale anchor.
+                # Drop it so the request goes through as a fresh turn,
+                # preventing upstream 400.
                 if (
                     not proxy_injected_previous_response_id
                     and effective_payload.previous_response_id is not None
-                    and stored_fingerprint is not None
+                    and stored_count > 0
                 ):
                     fresh_resend_payload = effective_payload.model_copy(
                         update={"previous_response_id": None}
@@ -3870,27 +3871,32 @@ class ProxyService:
         # stored context fingerprint does not match the incoming input, the
         # anchor is stale. Drop it so the request goes through as a fresh turn
         # instead of hitting upstream 400. Only applies to client-supplied IDs.
+        # Also drop when no stored fingerprint exists — we cannot verify the
+        # anchor and it is safer to send a fresh turn than risk a 400.
         if (
             not session_anchor
             and responses_payload.previous_response_id is not None
             and continuity_state is not None
-            and continuity_state.last_completed_input_prefix_fingerprint is not None
             and isinstance(responses_payload.input, list)
             and not client_full_resend_retry_safe
         ):
-            incoming_prefix_fingerprint = _fingerprint_input_items(
-                cast(list[JsonValue], responses_payload.input)[
-                    : continuity_state.last_completed_input_count or 0
-                ]
-            )
-            if incoming_prefix_fingerprint != continuity_state.last_completed_input_prefix_fingerprint:
+            stored_fp = continuity_state.last_completed_input_prefix_fingerprint
+            stored_count = continuity_state.last_completed_input_count or 0
+            if stored_count > 0:
+                incoming_prefix_fingerprint = _fingerprint_input_items(
+                    cast(list[JsonValue], responses_payload.input)[:stored_count]
+                )
+            else:
+                incoming_prefix_fingerprint = None
+            if stored_fp is None or incoming_prefix_fingerprint != stored_fp:
                 responses_payload = responses_payload.model_copy(
                     update={"previous_response_id": None}
                 )
                 logger.info(
-                    "websocket_client_previous_response_id_dropped_fingerprint_mismatch "
-                    "previous_response_id=%s",
+                    "websocket_client_previous_response_id_dropped "
+                    "previous_response_id=%s reason=%s",
                     responses_payload.previous_response_id,
+                    "fingerprint_mismatch" if stored_fp is not None else "no_stored_fingerprint",
                 )
         reservation = await self._reserve_websocket_api_key_usage(
             refreshed_api_key,

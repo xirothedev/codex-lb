@@ -127,8 +127,8 @@ export function WeeklyCreditsPaceCard({ pace }: WeeklyCreditsPaceCardProps) {
         <div>
           <h3 className="text-sm font-semibold">Weekly credits pace</h3>
         </div>
-        <div className={cn("flex h-9 w-9 items-center justify-center rounded-lg", statusClass)}>
-          <Gauge className="h-4 w-4" aria-hidden="true" />
+        <div className={cn("flex size-9 items-center justify-center rounded-lg", statusClass)}>
+          <Gauge className="size-4" aria-hidden="true" />
         </div>
       </div>
 

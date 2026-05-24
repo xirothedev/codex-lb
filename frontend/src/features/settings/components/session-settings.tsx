@@ -43,8 +43,8 @@ export function SessionSettings({ settings, busy, onSave }: SessionSettingsProps
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-              <TimerReset className="h-4 w-4 text-primary" aria-hidden="true" />
+            <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10">
+              <TimerReset className="size-4 text-primary" aria-hidden="true" />
             </div>
             <div>
               <h3 className="text-sm font-semibold">Session</h3>

@@ -48,7 +48,7 @@ export function AppHeader({
     >
       <div className="mx-auto flex w-full max-w-[1500px] items-center justify-between gap-4">
         <div className="flex min-w-0 flex-1 items-center gap-2.5">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-primary/15 to-primary/5">
+          <div className="flex size-8 items-center justify-center rounded-lg bg-gradient-to-br from-primary/15 to-primary/5">
             <CodexLogo size={20} className="text-primary" />
           </div>
           <div className="min-w-0">
@@ -85,9 +85,9 @@ export function AppHeader({
             variant="ghost"
             onClick={togglePrivacy}
             aria-label={blurred ? "Show emails" : "Hide emails"}
-            className="press-scale hidden h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground sm:inline-flex"
+            className="press-scale hidden size-8 rounded-lg text-muted-foreground hover:text-foreground sm:inline-flex"
           >
-            <PrivacyIcon className="h-3.5 w-3.5" aria-hidden="true" />
+            <PrivacyIcon className="size-3.5" aria-hidden="true" />
           </Button>
           {showLogout && (
             <Button
@@ -97,21 +97,21 @@ export function AppHeader({
               onClick={onLogout}
               className="press-scale hidden h-8 gap-1.5 rounded-lg text-xs text-muted-foreground hover:text-foreground sm:inline-flex"
             >
-              <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+              <LogOut className="size-3.5" aria-hidden="true" />
               Logout
             </Button>
           )}
 
           <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
             <SheetTrigger asChild>
-              <Button type="button" size="icon" variant="ghost" aria-label="Open menu" className="h-8 w-8 rounded-lg sm:hidden">
-                <Menu className="h-4 w-4" />
+              <Button type="button" size="icon" variant="ghost" aria-label="Open menu" className="size-8 rounded-lg sm:hidden">
+                <Menu className="size-4" />
               </Button>
             </SheetTrigger>
             <SheetContent side="right" className="w-72">
               <SheetHeader>
                 <SheetTitle className="flex items-center gap-2.5">
-                  <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10">
+                  <div className="flex size-7 items-center justify-center rounded-lg bg-primary/10">
                     <CodexLogo size={16} className="text-primary" />
                   </div>
                   <span className="text-sm font-semibold">Codex LB</span>
@@ -140,7 +140,7 @@ export function AppHeader({
                   className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   onClick={togglePrivacy}
                 >
-                  <PrivacyIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                  <PrivacyIcon className="size-3.5" aria-hidden="true" />
                   {blurred ? "Show Emails" : "Hide Emails"}
                 </button>
                 {showLogout && (
@@ -152,7 +152,7 @@ export function AppHeader({
                       onLogout();
                     }}
                   >
-                    <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+                    <LogOut className="size-3.5" aria-hidden="true" />
                     Logout
                   </button>
                 )}

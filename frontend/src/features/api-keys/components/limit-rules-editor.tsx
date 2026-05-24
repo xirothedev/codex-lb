@@ -135,7 +135,7 @@ export function LimitRulesEditor({ rules, onChange }: LimitRulesEditorProps) {
         <div className="space-y-2">
           {rules.map((rule, index) => (
             <LimitRuleCard
-              key={index}
+              key={`${rule.limitType}-${rule.limitWindow}-${rule.modelFilter ?? "all"}-${rule.maxValue}-${index}`}
               rule={rule}
               onChange={(updated) => updateRule(index, updated)}
               onRemove={() => removeRule(index)}

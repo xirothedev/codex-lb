@@ -23,6 +23,11 @@ export type ExpiryPickerProps = {
 export function ExpiryPicker({ value, onChange }: ExpiryPickerProps) {
   const [open, setOpen] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
+  const [todayStart] = useState(() => {
+    const date = new Date();
+    date.setHours(0, 0, 0, 0);
+    return date;
+  });
 
   const activePresetDays = getActivePreset(value);
 
@@ -96,8 +101,7 @@ export function ExpiryPicker({ value, onChange }: ExpiryPickerProps) {
               mode="single"
               selected={value ?? undefined}
               onSelect={handleCalendarSelect}
-              disabled={(date) => date < new Date(new Date().setHours(0, 0, 0, 0))}
-              autoFocus
+              disabled={(date) => date < todayStart}
             />
           </div>
         ) : (
@@ -120,7 +124,7 @@ export function ExpiryPicker({ value, onChange }: ExpiryPickerProps) {
               >
                 {preset.label}
                 <span aria-hidden="true" className="ml-auto text-xs text-muted-foreground">
-                  {format(addDays(new Date(), preset.days), "yyyy-MM-dd")}
+                  {format(addDays(todayStart, preset.days), "yyyy-MM-dd")}
                 </span>
               </OptionItem>
             ))}
@@ -132,7 +136,7 @@ export function ExpiryPicker({ value, onChange }: ExpiryPickerProps) {
               onClick={() => setShowCalendar(true)}
             >
               <CalendarIcon className="size-4" />
-              Custom date...
+              Custom date…
               {value && activePresetDays === null && (
                 <span aria-hidden="true" className="ml-auto text-xs text-muted-foreground">
                   {format(value, "yyyy-MM-dd")}

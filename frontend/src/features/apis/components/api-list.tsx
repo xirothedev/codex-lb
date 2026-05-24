@@ -56,7 +56,7 @@ export function ApiList({ apiKeys, selectedKeyId, onSelect, onOpenCreate }: ApiL
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         <div className="relative min-w-0 flex-1">
-          <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/60" aria-hidden />
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground/60" aria-hidden />
           <Input
             placeholder="Search API keys..."
             value={search}
@@ -79,7 +79,7 @@ export function ApiList({ apiKeys, selectedKeyId, onSelect, onOpenCreate }: ApiL
       </div>
 
       <Button type="button" size="sm" onClick={onOpenCreate} className="h-8 w-full gap-1.5 text-xs">
-        <Plus className="h-3.5 w-3.5" />
+        <Plus className="size-3.5" />
         Create API Key
       </Button>
 

@@ -43,12 +43,12 @@ function CopyButton({ text }: { text: string }) {
     >
       {copied ? (
         <>
-          <Check className="h-3 w-3" />
+          <Check className="size-3" />
           Copied!
         </>
       ) : (
         <>
-          <Copy className="h-3 w-3" />
+          <Copy className="size-3" />
           Copy
         </>
       )}
@@ -231,12 +231,12 @@ export function OauthDialog({
                 >
                   {browserRefreshInProgress ? (
                     <>
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                      Refreshing...
+                      <Loader2 className="size-3 animate-spin" />
+                      Refreshing…
                     </>
                   ) : (
                     <>
-                      <RefreshCw className="h-3 w-3" />
+                      <RefreshCw className="size-3" />
                       Refresh link
                     </>
                   )}
@@ -244,8 +244,8 @@ export function OauthDialog({
               </div>
               {browserRefreshInProgress ? (
                 <div className="flex items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  <span>Generating a fresh sign-in link...</span>
+                  <Loader2 className="size-3.5 animate-spin" />
+                  <span>Generating a fresh sign-in link…</span>
                 </div>
               ) : state.authorizationUrl ? (
                 <div className="flex min-w-0 items-center gap-2 rounded-lg border bg-muted/20 px-3 py-2">
@@ -259,8 +259,8 @@ export function OauthDialog({
             </div>
             <ManualCallbackInput onSubmit={onManualCallback} disabled={browserRefreshInProgress} />
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              <span>Waiting for authorization to complete...</span>
+              <Loader2 className="size-3.5 animate-spin" />
+              <span>Waiting for authorization to complete…</span>
             </div>
           </div>
         ) : null}
@@ -295,7 +295,7 @@ export function OauthDialog({
             ) : null}
 
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <Loader2 className="size-3.5 animate-spin" />
               <span>
                 Waiting for authorization
                 {state.expiresInSeconds != null && state.expiresInSeconds > 0
@@ -308,16 +308,16 @@ export function OauthDialog({
 
         {/* Success stage */}
         {stage === "success" ? (
-          <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-3 py-3 text-sm text-emerald-700 dark:text-emerald-400">
-            <Check className="h-4 w-4 shrink-0" />
+          <div className="flex items-center gap-2 rounded-lg border border-emerald-500/20 bg-emerald-500/10 p-3 text-sm text-emerald-700 dark:text-emerald-400">
+            <Check className="size-4 shrink-0" />
             <p>Account has been added successfully.</p>
           </div>
         ) : null}
 
         {/* Error stage */}
         {stage === "error" ? (
-          <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive">
-            <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+            <CircleAlert className="mt-0.5 size-4 shrink-0" />
             <p>{state.errorMessage || "An unknown error occurred."}</p>
           </div>
         ) : null}
@@ -361,7 +361,7 @@ export function OauthDialog({
                   asChild
                 >
                   <a href={state.authorizationUrl} target="_blank" rel="noreferrer">
-                    <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                    <ExternalLink className="mr-1.5 size-3.5" />
                     Open sign-in page
                   </a>
                 </Button>
@@ -386,7 +386,7 @@ export function OauthDialog({
                   asChild
                 >
                   <a href={state.verificationUrl} target="_blank" rel="noreferrer">
-                    <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
+                    <ExternalLink className="mr-1.5 size-3.5" />
                     Open link
                   </a>
                 </Button>

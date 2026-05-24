@@ -68,13 +68,13 @@ export function RequestArchivePanel({
           {records.map((record, index) => {
             const expanded = expandedIndex === index;
             return (
-              <div key={`${record.fileName ?? "archive"}-${record.timestamp ?? index}-${index}`} className="border-b last:border-b-0">
+              <div key={`${record.fileName ?? "archive"}-${record.timestamp ?? "pending"}`} className="border-b last:border-b-0">
                 <button
                   type="button"
                   className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-muted/60"
                   onClick={() => setExpandedIndex(expanded ? null : index)}
                 >
-                  {expanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                  {expanded ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
                   <ArchiveRecordSummary record={record} />
                 </button>
                 {expanded ? (

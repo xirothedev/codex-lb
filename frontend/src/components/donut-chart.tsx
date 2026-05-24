@@ -179,7 +179,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
 
       <div className="flex items-center gap-6">
         <div className="flex shrink-0 flex-col items-center gap-2">
-          <div className="relative h-[152px] w-[152px] overflow-visible">
+          <div className="relative size-[152px] overflow-visible">
             <PieChart width={CHART_SIZE} height={CHART_SIZE} margin={{ top: CHART_MARGIN, right: CHART_MARGIN, bottom: CHART_MARGIN, left: CHART_MARGIN }}>
              <Pie
                data={chartData}
@@ -283,7 +283,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
               <div className="flex min-w-0 items-center gap-2">
                 <span
                   aria-hidden
-                  className="h-2.5 w-2.5 shrink-0 rounded-full"
+                  className="size-2.5 shrink-0 rounded-full"
                   style={{ backgroundColor: item.color }}
                 />
                 <span className="truncate font-medium">
@@ -315,7 +315,7 @@ export function DonutChart({ items, total, centerValue, title, subtitle, safeLin
             <div className="flex min-w-0 items-center gap-2">
               <span
                 aria-hidden
-                className="h-2.5 w-2.5 shrink-0 rounded-full"
+                className="size-2.5 shrink-0 rounded-full"
                 style={{ backgroundColor: consumedColor }}
               />
               <span className="truncate font-medium">Used</span>

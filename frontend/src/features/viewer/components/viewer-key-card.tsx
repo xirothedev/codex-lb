@@ -34,8 +34,8 @@ export function ViewerKeyCard({ apiKey, busy, onRegenerate }: ViewerKeyCardProps
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="space-y-3">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
-              <KeyRound className="h-5 w-5 text-primary" aria-hidden="true" />
+            <div className="flex size-10 items-center justify-center rounded-xl bg-primary/10">
+              <KeyRound className="size-5 text-primary" aria-hidden="true" />
             </div>
             <div>
               <h2 className="text-lg font-semibold tracking-tight">{apiKey.name}</h2>
@@ -52,7 +52,7 @@ export function ViewerKeyCard({ apiKey, busy, onRegenerate }: ViewerKeyCardProps
         </div>
 
         <Button type="button" onClick={onRegenerate} disabled={busy} className="gap-2 self-start">
-          <RefreshCw className="h-4 w-4" aria-hidden="true" />
+          <RefreshCw className="size-4" aria-hidden="true" />
           Regenerate key
         </Button>
       </div>

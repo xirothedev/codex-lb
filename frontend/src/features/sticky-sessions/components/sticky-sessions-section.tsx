@@ -141,8 +141,8 @@ export function StickySessionsSection() {
   return (
     <section className="space-y-3 rounded-xl border bg-card p-5">
       <div className="flex items-center gap-2.5">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-          <Pin className="h-4 w-4 text-primary" aria-hidden="true" />
+        <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10">
+          <Pin className="size-4 text-primary" aria-hidden="true" />
         </div>
         <div>
           <h3 className="text-sm font-semibold">Sticky sessions</h3>

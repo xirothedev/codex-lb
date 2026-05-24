@@ -79,7 +79,7 @@ function CustomTooltip({ active, payload, label }: ChartTooltipProps) {
         return (
           <div key={entry.dataKey} className="flex items-center gap-2 text-xs">
             <span
-              className="inline-block h-2 w-2 rounded-full"
+              className="inline-block size-2 rounded-full"
               style={{ backgroundColor: entry.color }}
             />
             <span className="text-muted-foreground">{meta?.label}</span>

@@ -44,7 +44,7 @@ export function AccountsSkeleton() {
                 </div>
                 <Skeleton className="h-1.5 w-full rounded-full" />
                 <div className="flex items-center gap-1.5">
-                  <Skeleton className="h-3 w-3 rounded-sm" />
+                  <Skeleton className="size-3 rounded-sm" />
                   <Skeleton className="h-3 w-24" />
                 </div>
               </div>
@@ -56,11 +56,11 @@ export function AccountsSkeleton() {
               <Skeleton className="h-3 w-20" />
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-1.5">
-                  <Skeleton className="h-2 w-2 rounded-full" />
+                  <Skeleton className="size-2 rounded-full" />
                   <Skeleton className="h-2.5 w-12" />
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <Skeleton className="h-2 w-2 rounded-full" />
+                  <Skeleton className="size-2 rounded-full" />
                   <Skeleton className="h-2.5 w-16" />
                 </div>
               </div>

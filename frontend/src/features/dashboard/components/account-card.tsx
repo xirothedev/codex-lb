@@ -58,7 +58,7 @@ function QuotaBar({
         />
       </div>
       <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
-        <Clock className="h-3 w-3 shrink-0" />
+        <Clock className="size-3 shrink-0" />
         <span>{resetLabel}</span>
       </div>
     </div>
@@ -122,7 +122,7 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
           className="h-7 gap-1.5 rounded-lg text-xs text-muted-foreground hover:text-foreground"
           onClick={() => onAction?.(account, "details")}
         >
-          <ExternalLink className="h-3 w-3" />
+          <ExternalLink className="size-3" />
           Details
         </Button>
         {status === "paused" && (
@@ -133,7 +133,7 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
             className="h-7 gap-1.5 rounded-lg text-xs text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400 dark:hover:text-emerald-300"
             onClick={() => onAction?.(account, "resume")}
           >
-            <Play className="h-3 w-3" />
+            <Play className="size-3" />
             Resume
           </Button>
         )}
@@ -145,7 +145,7 @@ export function AccountCard({ account, showAccountId = false, onAction }: Accoun
             className="h-7 gap-1.5 rounded-lg text-xs text-amber-600 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
             onClick={() => onAction?.(account, "reauth")}
           >
-            <RotateCcw className="h-3 w-3" />
+            <RotateCcw className="size-3" />
             Re-auth
           </Button>
         )}

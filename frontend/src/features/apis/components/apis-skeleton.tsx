@@ -26,7 +26,7 @@ export function ApisSkeleton() {
             <Skeleton className="h-5 w-40" />
             <Skeleton className="h-3 w-32" />
           </div>
-          <Skeleton className="h-8 w-8 rounded-md" />
+          <Skeleton className="size-8 rounded-md" />
         </div>
 
         <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
@@ -44,11 +44,11 @@ export function ApisSkeleton() {
             <Skeleton className="h-3 w-20" />
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-1.5">
-                <Skeleton className="h-2 w-2 rounded-full" />
+                <Skeleton className="size-2 rounded-full" />
                 <Skeleton className="h-2.5 w-12" />
               </div>
               <div className="flex items-center gap-1.5">
-                <Skeleton className="h-2 w-2 rounded-full" />
+                <Skeleton className="size-2 rounded-full" />
                 <Skeleton className="h-2.5 w-12" />
               </div>
             </div>

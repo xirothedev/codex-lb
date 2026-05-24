@@ -56,45 +56,45 @@ export function PaginationControls({
         type="button"
         variant="outline"
         size="icon"
-        className="h-8 w-8"
+        className="size-8"
         disabled={offset <= 0}
         onClick={() => onOffsetChange(0)}
         aria-label="First page"
       >
-        <ChevronsLeft className="h-4 w-4" />
+        <ChevronsLeft className="size-4" />
       </Button>
       <Button
         type="button"
         variant="outline"
         size="icon"
-        className="h-8 w-8"
+        className="size-8"
         disabled={offset <= 0}
         onClick={() => onOffsetChange(Math.max(0, offset - limit))}
         aria-label="Previous page"
       >
-        <ChevronLeft className="h-4 w-4" />
+        <ChevronLeft className="size-4" />
       </Button>
       <Button
         type="button"
         variant="outline"
         size="icon"
-        className="h-8 w-8"
+        className="size-8"
         disabled={!hasMore}
         onClick={() => onOffsetChange(offset + limit)}
         aria-label="Next page"
       >
-        <ChevronRight className="h-4 w-4" />
+        <ChevronRight className="size-4" />
       </Button>
       <Button
         type="button"
         variant="outline"
         size="icon"
-        className="h-8 w-8"
+        className="size-8"
         disabled={!hasMore}
         onClick={() => onOffsetChange(lastPage)}
         aria-label="Last page"
       >
-        <ChevronsRight className="h-4 w-4" />
+        <ChevronsRight className="size-4" />
       </Button>
     </div>
   );

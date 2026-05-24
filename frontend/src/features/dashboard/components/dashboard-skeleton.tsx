@@ -9,7 +9,7 @@ export function DashboardSkeleton() {
           <div key={i} className="rounded-xl border bg-card p-4">
             <div className="flex items-center justify-between">
               <Skeleton className="h-3 w-20" />
-              <Skeleton className="h-8 w-8 rounded-lg" />
+              <Skeleton className="size-8 rounded-lg" />
             </div>
             <div className="mt-1">
               <Skeleton className="h-7 w-24" />
@@ -29,12 +29,12 @@ export function DashboardSkeleton() {
               <Skeleton className="h-3 w-20" />
             </div>
             <div className="flex items-center gap-6">
-              <Skeleton className="h-36 w-36 shrink-0 rounded-full" />
+              <Skeleton className="size-36 shrink-0 rounded-full" />
               <div className="flex-1 space-y-2.5">
                 {Array.from({ length: 5 }).map((_, j) => (
                   <div key={j} className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-2">
-                      <Skeleton className="h-2.5 w-2.5 rounded-full" />
+                      <Skeleton className="size-2.5 rounded-full" />
                       <Skeleton className="h-3 w-28" />
                     </div>
                     <Skeleton className="h-3 w-10" />
@@ -72,7 +72,7 @@ export function DashboardSkeleton() {
                     </div>
                     <Skeleton className="h-1.5 w-full rounded-full" />
                     <div className="flex items-center gap-1">
-                      <Skeleton className="h-3 w-3 rounded-sm" />
+                      <Skeleton className="size-3 rounded-sm" />
                       <Skeleton className="h-3 w-20" />
                     </div>
                   </div>
@@ -152,10 +152,10 @@ export function DashboardSkeleton() {
             <Skeleton className="h-3 w-8" />
             <Skeleton className="h-8 w-20 rounded-md" />
             <Skeleton className="h-3 w-20" />
-            <Skeleton className="h-8 w-8 rounded-md" />
-            <Skeleton className="h-8 w-8 rounded-md" />
-            <Skeleton className="h-8 w-8 rounded-md" />
-            <Skeleton className="h-8 w-8 rounded-md" />
+            <Skeleton className="size-8 rounded-md" />
+            <Skeleton className="size-8 rounded-md" />
+            <Skeleton className="size-8 rounded-md" />
+            <Skeleton className="size-8 rounded-md" />
           </div>
         </div>
       </div>

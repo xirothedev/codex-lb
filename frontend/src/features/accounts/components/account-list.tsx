@@ -63,7 +63,7 @@ export function AccountList({
     <div className="space-y-3">
       <div className="flex items-center gap-2">
         <div className="relative min-w-0 flex-1">
-          <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/60" aria-hidden />
+          <Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground/60" aria-hidden />
           <Input
             placeholder="Search accounts..."
             value={search}
@@ -87,11 +87,11 @@ export function AccountList({
 
       <div className="flex gap-2">
         <Button type="button" size="sm" variant="outline" onClick={onOpenImport} className="h-8 flex-1 gap-1.5 text-xs">
-          <Upload className="h-3.5 w-3.5" />
+          <Upload className="size-3.5" />
           Import
         </Button>
         <Button type="button" size="sm" onClick={onOpenOauth} className="h-8 flex-1 gap-1.5 text-xs">
-          <Plus className="h-3.5 w-3.5" />
+          <Plus className="size-3.5" />
           Add Account
         </Button>
       </div>
@@ -105,7 +105,7 @@ export function AccountList({
           onClick={() => setHelpOpen((current) => !current)}
         >
           Need help?
-          {helpOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+          {helpOpen ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
         </Button>
       </div>
 

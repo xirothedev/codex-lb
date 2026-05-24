@@ -79,7 +79,7 @@ export function MultiSelectFilter({ label, values, options, onChange }: MultiSel
       <DropdownMenuTrigger asChild>
         <Button type="button" variant="outline" size="sm" className="min-w-[7rem] justify-between gap-1.5">
           {summary}
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-50" />
+          <ChevronDown className="size-3.5 shrink-0 opacity-50" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="max-h-80 min-w-56 overflow-y-auto">
@@ -106,7 +106,7 @@ export function MultiSelectFilter({ label, values, options, onChange }: MultiSel
               {option.isStale ? (
                 <button
                   type="button"
-                  className="ml-auto inline-flex h-5 w-5 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+                  className="ml-auto inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
                   onClick={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
@@ -114,7 +114,7 @@ export function MultiSelectFilter({ label, values, options, onChange }: MultiSel
                   }}
                   aria-label={`Remove stale ${option.label}`}
                 >
-                  <X className="h-3.5 w-3.5" />
+                  <X className="size-3.5" />
                 </button>
               ) : null}
             </DropdownMenuCheckboxItem>

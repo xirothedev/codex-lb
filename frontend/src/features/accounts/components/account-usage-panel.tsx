@@ -55,7 +55,7 @@ function QuotaRow({
         />
       </div>
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-        <Clock className="h-3 w-3 shrink-0" />
+        <Clock className="size-3 shrink-0" />
         <span>Reset {formatQuotaResetLabel(resetAt ?? null)}</span>
       </div>
     </div>
@@ -184,11 +184,11 @@ export function AccountUsagePanel({ account, trends }: AccountUsagePanelProps) {
             <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">7-day trend</h4>
             <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
               <span className="flex items-center gap-1.5">
-                <span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
+                <span className="inline-block size-2 rounded-full bg-chart-1" />
                 5h
               </span>
               <span className="flex items-center gap-1.5">
-                <span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
+                <span className="inline-block size-2 rounded-full bg-chart-2" />
                 Weekly
               </span>
               {trends.secondaryScheduled.length > 0 ? (

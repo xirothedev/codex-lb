@@ -32,7 +32,7 @@ export function AccountActions({
           onClick={() => onResume(account.accountId)}
           disabled={busy}
         >
-          <Play className="h-3.5 w-3.5" />
+          <Play className="size-3.5" />
           Resume
         </Button>
       ) : (
@@ -44,7 +44,7 @@ export function AccountActions({
           onClick={() => onPause(account.accountId)}
           disabled={busy}
         >
-          <Pause className="h-3.5 w-3.5" />
+          <Pause className="size-3.5" />
           Pause
         </Button>
       )}
@@ -58,7 +58,7 @@ export function AccountActions({
           onClick={onReauth}
           disabled={busy}
         >
-          <RefreshCw className="h-3.5 w-3.5" />
+          <RefreshCw className="size-3.5" />
           Re-authenticate
         </Button>
       ) : null}
@@ -83,7 +83,7 @@ export function AccountActions({
         onClick={() => onDelete(account.accountId)}
         disabled={busy}
       >
-        <Trash2 className="h-3.5 w-3.5" />
+        <Trash2 className="size-3.5" />
         Delete
       </Button>
     </div>

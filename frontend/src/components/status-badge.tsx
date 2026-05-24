@@ -22,7 +22,7 @@ export function StatusBadge({ status }: StatusBadgeProps) {
 
   return (
     <Badge className={cn("gap-1.5", className)} variant="outline">
-      <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />
+      <span className="size-1.5 rounded-full bg-current" aria-hidden />
       {label}
     </Badge>
   );

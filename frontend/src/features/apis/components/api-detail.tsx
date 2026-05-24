@@ -96,8 +96,8 @@ export function ApiDetail({
 	if (!apiKey) {
 		return (
 			<div className="flex flex-col items-center justify-center rounded-xl border border-dashed p-12">
-				<div className="flex h-12 w-12 items-center justify-center rounded-xl bg-muted">
-					<KeyRound className="h-5 w-5 text-muted-foreground" />
+				<div className="flex size-12 items-center justify-center rounded-xl bg-muted">
+					<KeyRound className="size-5 text-muted-foreground" />
 				</div>
 				<p className="mt-3 text-sm font-medium text-muted-foreground">
 					Select an API key
@@ -176,11 +176,11 @@ export function ApiDetail({
 									<div className="flex items-center gap-3 text-[10px] text-muted-foreground" data-testid="api-trend-legend">
 										<span className="flex items-center gap-1.5">
 											Tokens
-											<span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
+											<span className="inline-block size-2 rounded-full bg-chart-2" />
 										</span>
 										<span className="flex items-center gap-1.5">
 											Cost
-											<span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
+											<span className="inline-block size-2 rounded-full bg-chart-1" />
 										</span>
 									</div>
 									<div className="flex items-center gap-1.5 rounded-md border px-2 py-1">
@@ -223,7 +223,7 @@ export function ApiDetail({
 						onClick={() => onToggleActive(apiKey)}
 						disabled={busy}
 					>
-						<Ellipsis className="h-3.5 w-3.5" />
+						<Ellipsis className="size-3.5" />
 						Disable
 					</Button>
 				) : (
@@ -234,7 +234,7 @@ export function ApiDetail({
 						onClick={() => onToggleActive(apiKey)}
 						disabled={busy}
 					>
-						<Play className="h-3.5 w-3.5" />
+						<Play className="size-3.5" />
 						Enable
 					</Button>
 				)}
@@ -246,7 +246,7 @@ export function ApiDetail({
 					onClick={() => onDelete(apiKey)}
 					disabled={busy}
 				>
-					<Trash2 className="h-3.5 w-3.5" />
+					<Trash2 className="size-3.5" />
 					Delete
 				</Button>
 			</div>

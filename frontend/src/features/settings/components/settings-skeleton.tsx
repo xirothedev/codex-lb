@@ -8,7 +8,7 @@ export function SettingsSkeleton() {
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
-              <Skeleton className="h-8 w-8 rounded-lg" />
+              <Skeleton className="size-8 rounded-lg" />
               <div className="space-y-1">
                 <Skeleton className="h-4 w-24" />
                 <Skeleton className="h-3 w-48" />
@@ -30,7 +30,7 @@ export function SettingsSkeleton() {
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
-              <Skeleton className="h-8 w-8 rounded-lg" />
+              <Skeleton className="size-8 rounded-lg" />
               <div className="space-y-1">
                 <Skeleton className="h-4 w-16" />
                 <Skeleton className="h-3 w-64" />
@@ -56,7 +56,7 @@ export function SettingsSkeleton() {
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
-              <Skeleton className="h-8 w-8 rounded-lg" />
+              <Skeleton className="size-8 rounded-lg" />
               <div className="space-y-1">
                 <Skeleton className="h-4 w-20" />
                 <Skeleton className="h-3 w-36" />
@@ -74,7 +74,7 @@ export function SettingsSkeleton() {
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
-              <Skeleton className="h-8 w-8 rounded-lg" />
+              <Skeleton className="size-8 rounded-lg" />
               <div className="space-y-1">
                 <Skeleton className="h-4 w-12" />
                 <Skeleton className="h-3 w-36" />
@@ -98,7 +98,7 @@ export function SettingsSkeleton() {
       <div className="space-y-3 rounded-xl border bg-card p-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <Skeleton className="h-8 w-8 rounded-lg" />
+            <Skeleton className="size-8 rounded-lg" />
             <div className="space-y-1">
               <Skeleton className="h-4 w-20" />
               <Skeleton className="h-3 w-52" />
@@ -126,7 +126,7 @@ export function SettingsSkeleton() {
       <div className="space-y-3 rounded-xl border bg-card p-5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <Skeleton className="h-8 w-8 rounded-lg" />
+            <Skeleton className="size-8 rounded-lg" />
             <div className="space-y-1">
               <Skeleton className="h-4 w-16" />
               <Skeleton className="h-3 w-52" />

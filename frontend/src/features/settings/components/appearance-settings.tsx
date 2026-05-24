@@ -39,8 +39,8 @@ export function AppearanceSettings() {
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-              <Palette className="h-4 w-4 text-primary" aria-hidden="true" />
+            <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10">
+              <Palette className="size-4 text-primary" aria-hidden="true" />
             </div>
             <div>
               <h3 className="text-sm font-semibold">Appearance</h3>
@@ -69,7 +69,7 @@ export function AppearanceSettings() {
                       : "text-muted-foreground hover:text-foreground",
                   )}
                 >
-                  <Icon className="h-3.5 w-3.5" />
+                  <Icon className="size-3.5" />
                   {label}
                 </button>
               ))}

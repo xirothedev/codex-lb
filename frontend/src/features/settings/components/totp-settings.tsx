@@ -121,8 +121,8 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
         {/* Status row */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
-              <Shield className="h-4 w-4 text-primary" aria-hidden="true" />
+            <div className="flex size-8 items-center justify-center rounded-lg bg-primary/10">
+              <Shield className="size-4 text-primary" aria-hidden="true" />
             </div>
             <div>
               <h3 className="text-sm font-semibold">TOTP</h3>
@@ -187,7 +187,7 @@ export function TotpSettings({ settings, disabled = false, onSave }: TotpSetting
 
           {setupQrDataUri ? (
             <div className="flex justify-center rounded-lg border bg-card p-4 dark:bg-white/95">
-              <img src={setupQrDataUri} alt="TOTP QR code" className="h-40 w-40" />
+              <img src={setupQrDataUri} alt="TOTP QR code" className="size-40" />
             </div>
           ) : null}
 

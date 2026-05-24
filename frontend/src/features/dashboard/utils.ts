@@ -427,7 +427,7 @@ function totalWeeklyBalanceCredits(accounts: WeeklyPoolSimulationAccount[]): num
 
 function consumeWeeklyBalanceCredits(accounts: WeeklyPoolSimulationAccount[], amountCredits: number): void {
   let remainingToConsume = amountCredits;
-  const spendOrder = [...accounts].sort((a, b) => a.resetAtMs - b.resetAtMs);
+  const spendOrder = accounts.toSorted((a, b) => a.resetAtMs - b.resetAtMs);
 
   for (const account of spendOrder) {
     if (remainingToConsume <= 0) {

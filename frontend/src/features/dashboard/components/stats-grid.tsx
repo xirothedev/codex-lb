@@ -30,8 +30,8 @@ export function StatsGrid({ stats }: StatsGridProps) {
           >
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{stat.label}</span>
-              <div className={cn("flex h-8 w-8 items-center justify-center rounded-lg", accent)}>
-                <Icon className="h-4 w-4" aria-hidden="true" />
+              <div className={cn("flex size-8 items-center justify-center rounded-lg", accent)}>
+                <Icon className="size-4" aria-hidden="true" />
               </div>
             </div>
             <div className="mt-1">

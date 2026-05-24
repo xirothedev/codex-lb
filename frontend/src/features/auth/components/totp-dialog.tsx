@@ -66,7 +66,6 @@ export function TotpDialog({ open }: TotpDialogProps) {
                   <FormControl>
                     <InputOTP
                       maxLength={6}
-                      autoFocus
                       value={field.value}
                       onChange={field.onChange}
                       onComplete={() => form.handleSubmit(handleSubmit)()}

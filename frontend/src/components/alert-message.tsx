@@ -22,7 +22,7 @@ export function AlertMessage({ variant, className, children }: AlertMessageProps
   const Icon = variantIcons[variant];
   return (
     <div className={cn("flex items-start gap-2.5 rounded-lg px-3 py-2 text-xs font-medium", variantStyles[variant], className)}>
-      <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+      <Icon className="mt-0.5 size-3.5 shrink-0" />
       <span>{children}</span>
     </div>
   );

@@ -780,12 +780,38 @@ class ProxyService:
                 stored_count=durable_lookup.latest_input_item_count or 0,
                 stored_fingerprint=durable_lookup.latest_input_full_fingerprint,
             )
+            # Non-full-resend payloads (e.g. short follow-ups) depend on the
+            # upstream anchor being valid. If the upstream response has expired
+            # or continuity was lost, injecting the stale ID causes a 400
+            # previous_response_not_found. Skip injection when the current input
+            # fingerprint does not match the stored one.
+            inject_durable_anchor = True
+            if (
+                not durable_anchor_trimmable
+                and durable_lookup.latest_input_full_fingerprint is not None
+                and isinstance(payload.input, list)
+                and len(payload.input) > 0
+            ):
+                current_fingerprint = _fingerprint_input_items(cast(list[JsonValue], payload.input))
+                if current_fingerprint != durable_lookup.latest_input_full_fingerprint:
+                    inject_durable_anchor = False
+                    _log_http_bridge_event(
+                        "durable_anchor_skipped_fingerprint_mismatch",
+                        bridge_session_key,
+                        account_id=None,
+                        model=payload.model,
+                        detail=f"response_id={durable_lookup.latest_response_id}",
+                        cache_key_family=bridge_session_key.affinity_kind,
+                        model_class=_extract_model_class(payload.model) if payload.model else None,
+                    )
+
             if (
                 not live_local_session_exists
                 and not forwards_to_active_owner
                 and payload.previous_response_id is None
                 and bridge_session_key.strength == "hard"
                 and durable_lookup.latest_response_id is not None
+                and inject_durable_anchor
                 and (not _http_bridge_payload_looks_like_full_resend(payload) or durable_anchor_trimmable)
             ):
                 effective_payload = payload.model_copy(

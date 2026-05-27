@@ -25,7 +25,12 @@ export const ViewerRequestLogEntrySchema = z.object({
 export const ViewerRequestLogsResponseSchema = z.object({
   requests: z.array(ViewerRequestLogEntrySchema),
   total: z.number(),
+  page: z.number().int().positive(),
+  page_size: z.number().int().positive(),
+  total_pages: z.number().int().nonnegative(),
   has_more: z.boolean(),
+  has_next: z.boolean(),
+  has_previous: z.boolean(),
 });
 
 export const ViewerUsageSummarySchema = z.object({

@@ -1,4 +1,5 @@
 import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import {
@@ -82,7 +83,16 @@ describe("ViewerDashboard", () => {
       total_cost_usd: 20.158733,
       avg_latency_ms: 1_250,
     });
-    (getViewerLogs as Mock).mockResolvedValue({ requests: [], total: 0, has_more: false });
+    (getViewerLogs as Mock).mockResolvedValue({
+      requests: [],
+      total: 0,
+      page: 1,
+      page_size: 25,
+      total_pages: 0,
+      has_more: false,
+      has_next: false,
+      has_previous: false,
+    });
     (getViewerQuota as Mock).mockResolvedValue(useViewerStore.getState().quota);
     (loginViewer as Mock).mockResolvedValue({ token: "opaque", expires_in: 86_400 });
     (logoutViewer as Mock).mockResolvedValue(undefined);
@@ -97,20 +107,72 @@ describe("ViewerDashboard", () => {
       totalCostUsd: 1.25,
       totalRequests: 1,
       cachedInputTokens: 100,
-      accountCosts: [{ accountId: null, email: null, costUsd: 1.25, isDeleted: false }],
+      accountCosts: [
+        {
+          accountId: "account-secret",
+          email: "secret-account@example.com",
+          costUsd: 1.25,
+          isDeleted: false,
+        },
+      ],
     });
   });
 
-  it("renders graph panel and formats cost quota limits as dollars", async () => {
+  it("renders graph panel without leaking account costs and formats cost quota limits as dollars", async () => {
     renderWithProviders(<ViewerDashboard />);
 
     await waitFor(() => {
       expect(screen.getByText("Customer key")).toBeInTheDocument();
     });
 
-    expect(screen.getByTestId("viewer-account-cost-donut")).toBeInTheDocument();
     expect(screen.getByTestId("viewer-api-trend-chart")).toBeInTheDocument();
+    expect(screen.queryByTestId("viewer-account-cost-donut")).not.toBeInTheDocument();
+    expect(screen.queryByText("secret-account@example.com")).not.toBeInTheDocument();
     expect(screen.getByText("$20.16 / $730.00")).toBeInTheDocument();
     expect(screen.getByText("Accumulated")).toBeInTheDocument();
+    expect(getViewerUsage7Day).not.toHaveBeenCalled();
+  });
+
+  it("fetches the next request-log page from pagination controls", async () => {
+    const user = userEvent.setup();
+    (getViewerLogs as Mock).mockImplementation(({ page }: { page: number }) =>
+      Promise.resolve({
+        requests: [
+          {
+            requested_at: page === 1 ? "2026-05-27T10:00:00Z" : "2026-05-27T09:00:00Z",
+            request_id: page === 1 ? "first-page-request" : "second-page-request",
+            model: page === 1 ? "model-page-1" : "model-page-2",
+            status: "success",
+            input_tokens: 10,
+            output_tokens: 20,
+            cached_input_tokens: 0,
+            cost_usd: 0.1,
+            latency_ms: 1200,
+            latency_first_token_ms: null,
+          },
+        ],
+        total: 30,
+        page,
+        page_size: 25,
+        total_pages: 2,
+        has_more: page === 1,
+        has_next: page === 1,
+        has_previous: page > 1,
+      }),
+    );
+
+    renderWithProviders(<ViewerDashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByText("model-page-1")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByLabelText("Next logs page"));
+
+    await waitFor(() => {
+      expect(screen.getByText("model-page-2")).toBeInTheDocument();
+    });
+    expect(getViewerLogs).toHaveBeenCalledWith({ page: 2, pageSize: 25 });
+    expect(screen.getByText("30 requests · page 2 of 2")).toBeInTheDocument();
   });
 });

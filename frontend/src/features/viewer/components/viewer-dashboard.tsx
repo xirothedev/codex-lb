@@ -1,6 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
-import { LogOut, BarChart3, Clock, DollarSign, Zap } from "lucide-react";
+import {
+  BarChart3,
+  ChevronLeft,
+  ChevronRight,
+  Clock,
+  DollarSign,
+  LogOut,
+  Zap,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -15,14 +23,12 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { AccountCostDonut } from "@/features/apis/components/account-cost-donut";
 import { ApiTrendChart } from "@/features/apis/components/api-trend-chart";
 import {
   getViewerKeyInfo,
   getViewerLogs,
   getViewerTrends,
   getViewerUsage,
-  getViewerUsage7Day,
 } from "@/features/viewer/api";
 import { useViewerStore } from "@/features/viewer/hooks/use-viewer";
 import { ApiError } from "@/lib/api-client";
@@ -63,6 +69,8 @@ function isUnauthorized(error: unknown): boolean {
   return error instanceof ApiError && error.status === 401;
 }
 
+const LOG_PAGE_SIZE = 25;
+
 function StatusBadge({ status }: { status: string }) {
   const isSuccess = status === "success";
   return (
@@ -84,6 +92,7 @@ export function ViewerDashboard() {
   const loadQuota = useViewerStore((s) => s.loadQuota);
   const quota = useViewerStore((s) => s.quota);
   const [showAccumulated, setShowAccumulated] = useState(false);
+  const [logsPage, setLogsPage] = useState(1);
 
   useEffect(() => {
     void loadQuota();
@@ -100,8 +109,8 @@ export function ViewerDashboard() {
   });
 
   const { data: logs, error: logsError, isLoading: logsLoading } = useQuery({
-    queryKey: ["viewer", "logs"],
-    queryFn: () => getViewerLogs({ limit: 50 }),
+    queryKey: ["viewer", "logs", logsPage],
+    queryFn: () => getViewerLogs({ page: logsPage, pageSize: LOG_PAGE_SIZE }),
   });
 
   const { data: trends, error: trendsError, isLoading: trendsLoading } = useQuery({
@@ -109,16 +118,11 @@ export function ViewerDashboard() {
     queryFn: getViewerTrends,
   });
 
-  const { data: usage7Day, error: usage7DayError, isLoading: usage7DayLoading } = useQuery({
-    queryKey: ["viewer", "usage-7d"],
-    queryFn: getViewerUsage7Day,
-  });
-
   useEffect(() => {
-    if ([keyError, usageError, logsError, trendsError, usage7DayError].some(isUnauthorized)) {
+    if ([keyError, usageError, logsError, trendsError].some(isUnauthorized)) {
       clearSession();
     }
-  }, [clearSession, keyError, logsError, trendsError, usage7DayError, usageError]);
+  }, [clearSession, keyError, logsError, trendsError, usageError]);
 
   const chartData = useMemo(() => {
     if (!trends) return null;
@@ -129,9 +133,8 @@ export function ViewerDashboard() {
     };
   }, [showAccumulated, trends]);
 
-  const hasDonutData = Boolean(usage7Day && usage7Day.accountCosts.length > 0);
   const hasTrends = Boolean(trends && (trends.cost.length > 0 || trends.tokens.length > 0));
-  const isLoading = keyLoading || usageLoading || logsLoading || trendsLoading || usage7DayLoading;
+  const isLoading = keyLoading || usageLoading || (logsLoading && !logs) || trendsLoading;
 
   return (
     <div className="min-h-screen bg-background">
@@ -230,56 +233,40 @@ export function ViewerDashboard() {
               </div>
             ) : null}
 
-            {hasDonutData || hasTrends ? (
-              <div className="mb-6 rounded-xl border bg-card p-4 lg:flex lg:items-start">
-                {hasDonutData && usage7Day ? (
-                  <div className={hasTrends ? "lg:w-[25%] lg:shrink-0 lg:pr-4" : "lg:w-full"}>
-                    <AccountCostDonut
-                      accountCosts={usage7Day.accountCosts}
-                      totalCostUsd={usage7Day.totalCostUsd}
-                    />
-                  </div>
-                ) : null}
-                {hasTrends ? (
-                  <div
-                    className={
-                      hasDonutData
-                        ? "mt-6 border-t pt-4 lg:mt-0 lg:w-[75%] lg:border-t-0 lg:border-l lg:pt-0 lg:pl-6"
-                        : "w-full"
-                    }
-                  >
-                    <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                      <div>
-                        <h3 className="text-sm font-semibold">Usage Trend</h3>
-                        <p className="text-xs text-muted-foreground">7-day token and cost activity</p>
+            {hasTrends ? (
+              <div className="mb-6 rounded-xl border bg-card p-4">
+                <div className="w-full">
+                  <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div>
+                      <h3 className="text-sm font-semibold">Usage Trend</h3>
+                      <p className="text-xs text-muted-foreground">7-day token and cost activity</p>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-start gap-3 md:justify-end">
+                      <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+                        <span className="flex items-center gap-1.5">
+                          Tokens
+                          <span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                          Cost
+                          <span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
+                        </span>
                       </div>
-                      <div className="flex flex-wrap items-center justify-start gap-3 md:justify-end">
-                        <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
-                          <span className="flex items-center gap-1.5">
-                            Tokens
-                            <span className="inline-block h-2 w-2 rounded-full bg-chart-2" />
-                          </span>
-                          <span className="flex items-center gap-1.5">
-                            Cost
-                            <span className="inline-block h-2 w-2 rounded-full bg-chart-1" />
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1.5 rounded-md border px-2 py-1">
-                          <span id="viewer-trend-accumulated-label" className="text-[10px]">
-                            Accumulated
-                          </span>
-                          <Switch
-                            size="sm"
-                            aria-labelledby="viewer-trend-accumulated-label"
-                            checked={showAccumulated}
-                            onCheckedChange={setShowAccumulated}
-                          />
-                        </div>
+                      <div className="flex items-center gap-1.5 rounded-md border px-2 py-1">
+                        <span id="viewer-trend-accumulated-label" className="text-[10px]">
+                          Accumulated
+                        </span>
+                        <Switch
+                          size="sm"
+                          aria-labelledby="viewer-trend-accumulated-label"
+                          checked={showAccumulated}
+                          onCheckedChange={setShowAccumulated}
+                        />
                       </div>
                     </div>
-                    {chartData ? <ApiTrendChart cost={chartData.cost} tokens={chartData.tokens} /> : null}
                   </div>
-                ) : null}
+                  {chartData ? <ApiTrendChart cost={chartData.cost} tokens={chartData.tokens} /> : null}
+                </div>
               </div>
             ) : null}
 
@@ -324,8 +311,37 @@ export function ViewerDashboard() {
 
             {logs ? (
               <Card>
-                <CardHeader>
-                  <CardTitle className="text-sm font-semibold">Request Logs</CardTitle>
+                <CardHeader className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <CardTitle className="text-sm font-semibold">Request Logs</CardTitle>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {logs.total > 0
+                        ? `${logs.total} requests · page ${logs.page} of ${logs.total_pages}`
+                        : "No requests yet"}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setLogsPage((page) => Math.max(1, page - 1))}
+                      disabled={!logs.has_previous || logsLoading}
+                      aria-label="Previous logs page"
+                    >
+                      <ChevronLeft className="size-4" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setLogsPage((page) => page + 1)}
+                      disabled={!logs.has_next || logsLoading}
+                      aria-label="Next logs page"
+                    >
+                      <ChevronRight className="size-4" />
+                    </Button>
+                  </div>
                 </CardHeader>
                 <CardContent>
                   <div className="overflow-x-auto">

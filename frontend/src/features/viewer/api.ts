@@ -24,10 +24,17 @@ export function logoutViewer() {
   return post(`${BASE}/auth/logout`, null as never);
 }
 
-export function getViewerLogs(params?: { limit?: number; cursor?: string }) {
+export function getViewerLogs(params?: {
+  limit?: number;
+  cursor?: string;
+  page?: number;
+  pageSize?: number;
+}) {
   const searchParams = new URLSearchParams();
   if (params?.limit) searchParams.set("limit", String(params.limit));
   if (params?.cursor) searchParams.set("cursor", params.cursor);
+  if (params?.page) searchParams.set("page", String(params.page));
+  if (params?.pageSize) searchParams.set("page_size", String(params.pageSize));
   const qs = searchParams.toString();
   return get(`${BASE}/logs${qs ? `?${qs}` : ""}`, ViewerRequestLogsResponseSchema);
 }

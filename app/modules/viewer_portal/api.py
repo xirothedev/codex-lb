@@ -8,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import ApiKeysContext, get_api_keys_context
 from app.db.session import get_session
 from app.modules.api_keys.schemas import (
-    ApiKeyAccountCostResponse,
     ApiKeyTrendPoint,
     ApiKeyTrendsResponse,
     ApiKeyUsage7DayResponse,
@@ -63,9 +62,17 @@ async def list_logs(
     db: AsyncSession = Depends(get_session),
     limit: int = Query(50, ge=1, le=200),
     cursor: datetime | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int | None = Query(None, ge=1, le=200),
 ):
     service = ViewerPortalService(db)
-    return await service.list_request_logs(session_data.api_key_id, limit=limit, cursor=cursor)
+    return await service.list_request_logs(
+        session_data.api_key_id,
+        limit=limit,
+        cursor=cursor,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get("/usage", response_model=ViewerUsageSummary)
@@ -123,13 +130,5 @@ async def get_usage_7d(
         total_cost_usd=result.total_cost_usd,
         total_requests=result.total_requests,
         cached_input_tokens=result.cached_input_tokens,
-        account_costs=[
-            ApiKeyAccountCostResponse(
-                account_id=account_cost.account_id,
-                email=account_cost.email,
-                cost_usd=account_cost.cost_usd,
-                is_deleted=account_cost.is_deleted,
-            )
-            for account_cost in result.account_costs
-        ],
+        account_costs=[],
     )

@@ -21,7 +21,12 @@ class ViewerRequestLogEntry(BaseModel):
 class ViewerRequestLogsResponse(BaseModel):
     requests: list[ViewerRequestLogEntry]
     total: int
+    page: int
+    page_size: int
+    total_pages: int
     has_more: bool
+    has_next: bool
+    has_previous: bool
 
 
 class ViewerUsageSummary(BaseModel):

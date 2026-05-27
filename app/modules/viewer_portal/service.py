@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta
 
 import sqlalchemy as sa
@@ -24,7 +25,11 @@ class ViewerPortalService:
         *,
         limit: int = 50,
         cursor: datetime | None = None,
+        page: int = 1,
+        page_size: int | None = None,
     ) -> ViewerRequestLogsResponse:
+        page_size = page_size or limit
+        offset = (page - 1) * page_size
         base = (
             sa.select(RequestLog)
             .where(
@@ -36,10 +41,10 @@ class ViewerPortalService:
         if cursor:
             base = base.where(RequestLog.requested_at < cursor)
 
-        result = await self._session.execute(base.limit(limit + 1))
+        result = await self._session.execute(base.offset(offset).limit(page_size + 1))
         rows = result.scalars().all()
-        has_more = len(rows) > limit
-        entries = rows[:limit]
+        has_more = len(rows) > page_size
+        entries = rows[:page_size]
 
         count_result = await self._session.execute(
             sa.select(sa.func.count())
@@ -47,6 +52,7 @@ class ViewerPortalService:
             .where(RequestLog.api_key_id == api_key_id, RequestLog.deleted_at.is_(None))
         )
         total = count_result.scalar() or 0
+        total_pages = max(1, math.ceil(total / page_size)) if total else 0
 
         return ViewerRequestLogsResponse(
             requests=[
@@ -65,7 +71,12 @@ class ViewerPortalService:
                 for r in entries
             ],
             total=total,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
             has_more=has_more,
+            has_next=has_more,
+            has_previous=page > 1,
         )
 
     async def get_usage_summary(

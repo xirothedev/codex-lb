@@ -40,6 +40,7 @@ export const ViewerUsageSummarySchema = z.object({
 });
 
 export const ViewerKeyInfoSchema = z.object({
+  key_id: z.string(),
   key_name: z.string(),
   is_active: z.boolean(),
 });

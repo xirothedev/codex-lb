@@ -44,5 +44,6 @@ class ViewerQuotaEntry(BaseModel):
 
 
 class ViewerKeyInfo(BaseModel):
+    key_id: str
     key_name: str
     is_active: bool

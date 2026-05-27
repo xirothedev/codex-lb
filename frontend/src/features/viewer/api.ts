@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ApiKeyTrendsResponseSchema, ApiKeyUsage7DayResponseSchema } from "@/features/apis/schemas";
 import { get, post } from "@/lib/api-client";
 import {
   ViewerKeyInfoSchema,
@@ -42,4 +43,12 @@ export function getViewerKeyInfo() {
 
 export function getViewerQuota(): Promise<ViewerQuotaEntry[]> {
   return get(`${BASE}/quota`, z.array(ViewerQuotaEntrySchema));
+}
+
+export function getViewerTrends() {
+  return get(`${BASE}/trends`, ApiKeyTrendsResponseSchema);
+}
+
+export function getViewerUsage7Day() {
+  return get(`${BASE}/usage-7d`, ApiKeyUsage7DayResponseSchema);
 }

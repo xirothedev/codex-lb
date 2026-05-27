@@ -1,43 +1,54 @@
 from __future__ import annotations
 
-import hashlib
-import secrets
-import time
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass
+from time import time
 
+from app.core.crypto import TokenEncryptor
 from app.modules.viewer_auth.schemas import ViewerSessionData
 
 _SESSION_TTL_SECONDS = 3600 * 24  # 24 hours
-_TOKEN_BYTES = 32
-
-
-@dataclass(slots=True)
-class _SessionEntry:
-    data: ViewerSessionData
-    expires_at: float
 
 
 @dataclass(slots=True)
 class ViewerSessionStore:
-    _sessions: dict[str, _SessionEntry] = field(default_factory=dict)
+    _encryptor: TokenEncryptor | None = None
+
+    def _get_encryptor(self) -> TokenEncryptor:
+        if self._encryptor is None:
+            self._encryptor = TokenEncryptor()
+        return self._encryptor
 
     def create(self, session_data: ViewerSessionData) -> tuple[str, int]:
-        token = secrets.token_hex(_TOKEN_BYTES)
-        expires_at = time.monotonic() + _SESSION_TTL_SECONDS
-        self._sessions[token] = _SessionEntry(data=session_data, expires_at=expires_at)
+        expires_at = int(time()) + _SESSION_TTL_SECONDS
+        payload = json.dumps(
+            {"exp": expires_at, "kid": session_data.api_key_id},
+            separators=(",", ":"),
+        )
+        token = self._get_encryptor().encrypt(payload).decode("ascii")
         return token, _SESSION_TTL_SECONDS
 
     def get(self, token: str) -> ViewerSessionData | None:
-        entry = self._sessions.get(token)
-        if entry is None:
+        stripped = token.strip()
+        if not stripped:
             return None
-        if time.monotonic() > entry.expires_at:
-            del self._sessions[token]
+        try:
+            raw = self._get_encryptor().decrypt(stripped.encode("ascii"))
+            payload = json.loads(raw)
+        except Exception:
             return None
-        return entry.data
+
+        expires_at = payload.get("exp")
+        api_key_id = payload.get("kid")
+        if not isinstance(expires_at, int) or not isinstance(api_key_id, str) or not api_key_id:
+            return None
+        if expires_at < int(time()):
+            return None
+        return ViewerSessionData(api_key_id=api_key_id)
 
     def delete(self, token: str) -> None:
-        self._sessions.pop(token, None)
+        # Stateless: deletion is handled by clearing the cookie client-side.
+        return
 
 
 _store = ViewerSessionStore()
@@ -45,7 +56,3 @@ _store = ViewerSessionStore()
 
 def get_viewer_session_store() -> ViewerSessionStore:
     return _store
-
-
-def hash_api_key(api_key: str) -> str:
-    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()

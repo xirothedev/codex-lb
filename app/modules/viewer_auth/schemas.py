@@ -14,5 +14,3 @@ class ViewerLoginResponse(BaseModel):
 
 class ViewerSessionData(BaseModel):
     api_key_id: str
-    key_name: str
-    is_active: bool
